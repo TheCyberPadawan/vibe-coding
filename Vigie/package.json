@@ -1,0 +1,43 @@
+{
+  "name": "vigie",
+  "productName": "Vigie",
+  "version": "1.0.0",
+  "description": "Pare-feu visuel en direct : voir qui se connecte, fermer les ports exposés, couper ou restreindre l'accès Internet d'un programme.",
+  "author": "Vigie",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "icon": "electron scripts/icon.js",
+    "test": "node scripts/test-security.js",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "44.9.3",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "fr.vigie.app",
+    "productName": "Vigie",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": ["main.js", "preload.js", "ps.js", "monitor.js", "helper.js", "net.js", "ps/**/*", "app/**/*", "build/icon.png"],
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
+    "win": { "target": "nsis", "icon": "build/icon.ico" },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Vigie",
+      "language": "1036"
+    }
+  }
+}

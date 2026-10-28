@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Aware</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 3 4 8v7c0 7.2 5.1 12.6 12 14 6.9-1.4 12-6.8 12-14V8z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+        <circle cx="16" cy="15.5" r="4.2" fill="currentColor"/>
+      </svg>
+      <span>aware</span>
+    </div>
+    <div class="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <input id="search" type="search" placeholder="Rechercher une application…" autocomplete="off">
+    </div>
+    <div class="actions">
+      <button id="btn-refresh" class="btn ghost" title="Actualiser">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Actualiser
+      </button>
+      <button id="btn-settings" class="btn ghost icon" title="Paramètres">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <section class="summary">
+    <div class="stat"><span class="stat-value" id="stat-total">–</span><span class="stat-label">Applications</span></div>
+    <div class="stat"><span class="stat-value accent" id="stat-updates">–</span><span class="stat-label">Mises à jour</span></div>
+    <div class="stat"><span class="stat-value danger" id="stat-vuln">–</span><span class="stat-label">Vulnérables</span></div>
+    <div class="stat"><span class="stat-value" id="stat-cves">–</span><span class="stat-label">CVE trouvées</span></div>
+    <button id="btn-update-all" class="btn primary" disabled>Tout mettre à jour</button>
+  </section>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-filter="updates">Mises à jour <span class="count" id="count-updates">0</span></button>
+    <button class="tab" data-filter="vulnerable">Vulnérables <span class="count" id="count-vulnerable">0</span></button>
+    <button class="tab" data-filter="all">Toutes <span class="count" id="count-all">0</span></button>
+    <div class="scan-status" id="scan-status"></div>
+  </nav>
+
+  <main id="list" class="list"></main>
+
+  <aside id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div class="avatar big" id="d-avatar"></div>
+      <div class="drawer-title">
+        <h2 id="d-name"></h2>
+        <p id="d-id"></p>
+      </div>
+      <button class="btn ghost icon" id="d-close" title="Fermer">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="drawer-versions" id="d-versions"></div>
+    <div class="drawer-actions" id="d-actions"></div>
+    <div id="d-help"></div>
+    <h3>Vulnérabilités <span id="d-cpe" class="muted small"></span></h3>
+    <div id="d-cves" class="cves"></div>
+  </aside>
+  <div id="scrim" class="scrim"></div>
+
+  <dialog id="settings">
+    <form method="dialog">
+      <h2>Paramètres</h2>
+      <label for="api-key">Clé API NVD (facultative)</label>
+      <input id="api-key" type="password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off">
+      <p class="muted small">Sans clé, la base NVD limite à 5 requêtes toutes les 30 secondes : l'analyse des CVE est donc lente. Une clé gratuite la rend environ 10× plus rapide.
+        <a href="#" id="nvd-link">Obtenir une clé</a></p>
+      <div class="dialog-actions">
+        <button value="cancel" class="btn ghost">Annuler</button>
+        <button value="save" class="btn primary" id="save-settings">Enregistrer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toasts" class="toasts"></div>
+  <script src="app.js"></script>
+</body>
+</html>

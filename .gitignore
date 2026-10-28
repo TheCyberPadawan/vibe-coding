@@ -1,0 +1,9 @@
+# Filet de sécurité au niveau du dépôt (chaque projet a aussi son propre .gitignore)
+**/node_modules/
+**/dist/
+
+# Fichiers système et éditeur
+.DS_Store
+Thumbs.db
+*.log
+*.tmp

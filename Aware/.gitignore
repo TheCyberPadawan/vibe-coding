@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# PyInstaller (régénérés par build.bat)
+build/
+dist/
+*.spec
+
+# Dépendances installées localement pour les tests (pip --target)
+py/
+
+# Fichiers système et éditeur
+.DS_Store
+Thumbs.db
+*.log
+*.tmp

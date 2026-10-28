@@ -1,0 +1,11 @@
+# Dépendances (à réinstaller avec : npm install)
+node_modules/
+
+# Sorties de compilation (les installateurs vont dans les « Releases » GitHub, pas dans l'historique)
+dist/
+
+# Fichiers système et éditeur
+.DS_Store
+Thumbs.db
+*.log
+*.tmp

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Rempart</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --panel2: #f9fafb; --line: #e3e6ea; --text: #16191d; --muted: #5f6872; --faint: #8a939c;
+  --accent: #2f5bd3; --accent-ink: #ffffff; --accent-soft: #e8eefc;
+  --ok: #1f8a4c; --ok-soft: #e4f4ea; --ko: #c8372d; --ko-soft: #fbe7e5; --warn: #b86e00; --warn-soft: #fdf1dc;
+  --unk: #6b7480; --unk-soft: #eceef1; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418; --panel: #1a1e24; --panel2: #1f242b; --line: #2b313a; --text: #e8ebef; --muted: #a3acb6; --faint: #78828d;
+    --accent: #6f93ff; --accent-ink: #0b1020; --accent-soft: #1f2a47;
+    --ok: #4cc27f; --ok-soft: #173426; --ko: #ff6b5e; --ko-soft: #3a1c1a; --warn: #f0a53a; --warn-soft: #3a2a12;
+    --unk: #9aa3ad; --unk-soft: #262b32; --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+button { font: inherit; color: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); padding: 7px 14px; white-space: nowrap; }
+button:hover:not(:disabled) { border-color: var(--faint); }
+button:disabled { opacity: .55; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+button.link { border: 0; background: none; color: var(--accent); padding: 7px 8px; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 48px; }
+header.top { display: flex; align-items: center; gap: 16px; padding: 18px 0; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 12px; margin-right: auto; }
+.brand svg { width: 38px; height: 38px; }
+.brand h1 { margin: 0; font-size: 20px; letter-spacing: -.01em; }
+.brand p { margin: 0; color: var(--muted); font-size: 13px; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.banner { display: flex; align-items: center; gap: 12px; background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent); padding: 10px 14px; border-radius: 10px; margin-bottom: 16px; }
+.banner span { flex: 1; }
+
+.hero { display: grid; grid-template-columns: auto 1fr; gap: 28px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 22px 26px; box-shadow: var(--shadow); }
+.gauge { position: relative; width: 132px; height: 132px; }
+.gauge svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.gauge circle { fill: none; stroke-width: 11; }
+.gauge .track { stroke: var(--unk-soft); }
+.gauge .val { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .6s ease, stroke .3s; }
+.gauge .num { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; }
+.gauge b { font-size: 38px; line-height: 1; font-variant-numeric: tabular-nums; }
+.gauge small { color: var(--muted); font-size: 12px; }
+.summary h2 { margin: 0 0 2px; font-size: 22px; }
+.summary .machine { color: var(--muted); margin: 0 0 14px; font-size: 13px; }
+.counters { display: flex; gap: 8px; flex-wrap: wrap; }
+.counter { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; background: var(--panel2); }
+.counter b { font-variant-numeric: tabular-nums; }
+.counter[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.progress { height: 4px; background: var(--unk-soft); border-radius: 4px; margin-top: 16px; overflow: hidden; }
+.progress div { height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+.progress.done { visibility: hidden; }
+
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--unk); }
+.s-ok .dot, .dot.ok { background: var(--ok); }
+.s-ko .dot, .dot.ko { background: var(--ko); }
+.s-warn .dot, .dot.warn { background: var(--warn); }
+
+section.cat { margin-top: 26px; }
+section.cat h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px 4px; display: flex; gap: 8px; }
+section.cat h3 span { color: var(--faint); font-weight: 400; }
+.list { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); }
+.check { border-top: 1px solid var(--line); }
+.check:first-child { border-top: 0; }
+.row { display: grid; grid-template-columns: 22px 1fr auto auto 18px; gap: 12px; align-items: center; padding: 12px 16px; cursor: pointer; }
+.row:hover { background: var(--panel2); }
+.row .dot { margin-left: 4px; }
+.s-pending .dot { animation: pulse 1s infinite ease-in-out; }
+@keyframes pulse { 50% { opacity: .3; } }
+.title { font-weight: 600; }
+.detail { color: var(--muted); font-size: 13px; margin-top: 1px; }
+.s-ko .detail { color: var(--ko); }
+.sev { font-size: 11.5px; padding: 2px 8px; border-radius: 999px; background: var(--unk-soft); color: var(--muted); }
+.sev.critique { background: var(--ko-soft); color: var(--ko); }
+.sev.elevee { background: var(--warn-soft); color: var(--warn); }
+.btns { display: flex; gap: 6px; }
+.btns button { padding: 5px 12px; font-size: 13px; }
+.chev { width: 18px; height: 18px; color: var(--faint); transition: transform .2s; }
+.check.open .chev { transform: rotate(180deg); }
+.more { display: none; padding: 0 16px 16px 54px; color: var(--muted); }
+.check.open .more { display: block; }
+.more h4 { margin: 10px 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); }
+.more p { margin: 0; max-width: 72ch; }
+.tag { display: inline-block; font-size: 12px; margin: 6px 6px 0 0; padding: 2px 8px; border-radius: 6px; background: var(--panel2); border: 1px solid var(--line); }
+.tag.saved { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.empty { padding: 24px; text-align: center; color: var(--muted); }
+
+dialog { border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(520px, calc(100vw - 32px)); background: var(--panel); color: var(--text); box-shadow: 0 20px 50px rgba(0,0,0,.25); }
+dialog::backdrop { background: rgba(10,14,20,.45); }
+dialog .body { padding: 20px 22px 8px; }
+dialog h2 { margin: 0 0 8px; font-size: 17px; }
+dialog ul { padding-left: 18px; color: var(--muted); margin: 10px 0; }
+dialog li { margin: 4px 0; }
+dialog .foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px 18px; }
+
+#toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px); opacity: 0; pointer-events: none; transition: .25s; background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; max-width: min(640px, calc(100vw - 32px)); box-shadow: 0 8px 24px rgba(0,0,0,.2); }
+#toast.show { opacity: 1; transform: translateX(-50%); }
+#toast.err { background: var(--ko); color: #fff; }
+
+@media (max-width: 760px) {
+  .wrap { padding: 0 16px 40px; }
+  .hero { grid-template-columns: 1fr; justify-items: center; text-align: center; }
+  .counters { justify-content: center; }
+  .row { grid-template-columns: 22px 1fr 18px; }
+  .row .sev { display: none; }
+  .row .btns { grid-column: 2 / 4; grid-row: 2; }
+  .more { padding-left: 16px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 48 48" aria-hidden="true">
+        <path d="M24 4 7 10v12c0 11 7.3 19.4 17 22 9.7-2.6 17-11 17-22V10L24 4Z" fill="var(--accent)"/>
+        <path d="m16.5 24 5.5 5.5 10-11" fill="none" stroke="var(--accent-ink)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div><h1>Rempart</h1><p>Audit de sécurité de Windows</p></div>
+    </div>
+    <div class="actions">
+      <button id="btnRestore" title="Crée un point de restauration système avant de modifier quoi que ce soit">Point de restauration</button>
+      <button id="btnPdf" disabled>Exporter le rapport PDF</button>
+      <button id="btnScan" class="primary" disabled>Relancer l'analyse</button>
+    </div>
+  </header>
+
+  <div id="adminBar" class="banner" hidden>
+    <span id="adminText"></span>
+    <button id="btnAdmin">Relancer en administrateur</button>
+  </div>
+
+  <section class="hero">
+    <div class="gauge">
+      <svg viewBox="0 0 132 132"><circle class="track" cx="66" cy="66" r="54"/><circle id="ring" class="val" cx="66" cy="66" r="54"/></svg>
+      <div class="num"><b id="score">–</b><small>sur 100</small></div>
+    </div>
+    <div class="summary">
+      <h2 id="grade">Analyse en cours…</h2>
+      <p class="machine" id="machine">Lecture de la configuration de Windows</p>
+      <div class="counters" id="counters"></div>
+      <div class="progress" id="progress"><div id="bar"></div></div>
+    </div>
+  </section>
+
+  <div id="cats"></div>
+</div>
+
+<dialog id="confirm">
+  <div class="body">
+    <h2 id="cTitle"></h2>
+    <p id="cDesc"></p>
+    <ul id="cList"></ul>
+  </div>
+  <div class="foot">
+    <button id="cNo">Annuler</button>
+    <button id="cYes" class="primary">Appliquer</button>
+  </div>
+</dialog>
+<div id="toast" role="status"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

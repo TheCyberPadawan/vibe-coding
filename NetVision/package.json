@@ -1,0 +1,44 @@
+{
+  "name": "netvision",
+  "productName": "NetVision",
+  "version": "1.0.0",
+  "description": "Cartographie du réseau local : découvre les appareils connectés et ce que l'on peut savoir d'eux. Sans droits administrateur.",
+  "author": "NetVision",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "oui": "node scripts/oui.js",
+    "start": "electron .",
+    "icon": "electron scripts/icon.js",
+    "test": "node scripts/test-security.js",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "44.9.3",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "fr.netvision.app",
+    "productName": "NetVision",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": ["main.js", "preload.js", "ps.js", "net.js", "ps/**/*", "app/**/*", "build/icon.png"],
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
+    "win": { "target": "nsis", "icon": "build/icon.ico" },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "NetVision",
+      "language": "1036"
+    }
+  }
+}

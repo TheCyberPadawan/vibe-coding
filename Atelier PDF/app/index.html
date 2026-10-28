@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Aucun script intégré ni eval, aucune connexion vers l'extérieur : un PDF piégé ne peut rien envoyer -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Atelier PDF</title>
+<link rel="stylesheet" href="vendor/fonts/fonts.css">
+<script type="module" src="js/pdfjs.mjs"></script>
+<script src="vendor/pdf-lib.min.js"></script>
+<script src="js/redact.js"></script>
+<script src="js/pdfcrypt.js"></script>
+<script src="js/sanitize.js"></script>
+<script src="js/compress.js"></script>
+<script src="js/ocr.js"></script>
+<style>
+/* Mise en page : barre d'actions + barre d'outils en haut, miniatures à gauche, plan de travail au centre */
+:root{
+  --ground:#e3e7e3; --panel:#f8f9f7; --line:#d2d8d3; --hover:#e9eeea;
+  --ink:#18221f; --muted:#5d6a65; --accent:#0d6b62; --accent-ink:#ffffff; --accent-soft:#d3ebe6;
+  --danger:#b3362c; --sel:#1f73d8; --shadow:rgba(16,40,34,.16);
+  --paper:#ffffff; --paper-ink:#111111; --field:rgba(31,115,216,.10); --field-line:rgba(31,115,216,.55);
+  --font-ui:"Instrument Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono:"IBM Plex Mono", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#111514; --panel:#1a1f1e; --line:#2b3331; --hover:#242b29;
+    --ink:#e2e8e5; --muted:#92a09a; --accent:#52c2b1; --accent-ink:#0a1916; --accent-soft:#1d3833;
+    --danger:#f07b70; --sel:#5ba7ff; --shadow:rgba(0,0,0,.5); color-scheme: dark;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#111514; --panel:#1a1f1e; --line:#2b3331; --hover:#242b29;
+  --ink:#e2e8e5; --muted:#92a09a; --accent:#52c2b1; --accent-ink:#0a1916; --accent-soft:#1d3833;
+  --danger:#f07b70; --sel:#5ba7ff; --shadow:rgba(0,0,0,.5); color-scheme: dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;background:var(--ground);color:var(--ink);font:14px/1.4 var(--font-ui);overflow:hidden}
+button,input,select,textarea{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--sel);outline-offset:2px}
+#app{height:100%;display:grid;grid-template-rows:auto auto 1fr auto}
+
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;background:var(--panel);border-bottom:1px solid var(--line);
+  padding-block:8px;padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;letter-spacing:-.01em;margin-right:10px;white-space:nowrap}
+.brand .mark{width:20px;height:26px;border:1.6px solid var(--accent);border-radius:2px;position:relative;background:linear-gradient(135deg,transparent 0 68%,var(--accent) 68% 100%)}
+.brand .mark::after{content:"";position:absolute;left:4px;right:6px;top:7px;height:1.6px;background:var(--accent);box-shadow:0 5px 0 var(--accent),0 10px 0 var(--accent)}
+.btn{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 10px;border:1px solid transparent;border-radius:7px;background:transparent;cursor:pointer;font-weight:500;white-space:nowrap}
+.btn:hover:not(:disabled){background:var(--hover)}
+.btn:disabled{opacity:.4;cursor:default}
+.btn svg,.ico{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.btn.primary{background:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.08)}
+.btn.icon{padding:0 8px}
+.btn.danger{color:var(--danger)}
+.sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+.spacer{flex:1}
+.zoomval{font:500 12px var(--font-mono);min-width:46px;text-align:center;font-variant-numeric:tabular-nums}
+.toolrow{gap:4px 4px;padding-block:6px}
+.tool[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+.tool .lbl{font-size:13px}
+#props{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-left:auto;min-height:34px;font-size:13px;color:var(--muted)}
+#props label{display:inline-flex;align-items:center;gap:6px}
+#props select,#props input[type=number]{height:30px;border:1px solid var(--line);border-radius:6px;background:var(--panel);padding:0 6px;color:var(--ink)}
+#props input[type=number]{width:62px}
+#props input[type=color]{width:30px;height:30px;padding:0;border:1px solid var(--line);border-radius:6px;background:none;cursor:pointer}
+#props input[type=range]{width:90px;accent-color:var(--accent)}
+#props .hint{max-width:56ch}
+.swatches{display:inline-flex;gap:4px}
+.swatch{width:22px;height:22px;border-radius:50%;border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line);cursor:pointer;padding:0}
+.swatch[aria-pressed="true"]{box-shadow:0 0 0 2px var(--accent)}
+.toggle[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
+
+main{display:grid;grid-template-columns:184px 1fr;min-height:0}
+#side{overflow:auto;border-right:1px solid var(--line);background:var(--panel);padding:12px 12px 40px}
+#side .sidehead{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 10px;display:flex;justify-content:space-between}
+#thumbs{display:flex;flex-direction:column;gap:14px}
+.thumb{display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px;border-radius:8px;border:2px solid transparent;cursor:grab;position:relative}
+.thumb.active{border-color:var(--accent)}
+.thumb .tcanvas{background:var(--paper);box-shadow:0 1px 4px var(--shadow);min-height:60px;min-width:60px;display:grid;place-items:center}
+.thumb canvas{display:block}
+.thumb .tmeta{display:flex;align-items:center;justify-content:space-between;width:100%;padding:0 2px}
+.thumb .num{font:500 12px var(--font-mono);color:var(--muted)}
+.thumb .tact{display:flex;gap:0;opacity:.0;transition:opacity .12s}
+.thumb:hover .tact,.thumb:focus-within .tact,.thumb.active .tact{opacity:1}
+.thumb .tact button{border:0;background:none;padding:3px;border-radius:5px;cursor:pointer;color:var(--muted);display:grid}
+.thumb .tact button:hover{background:var(--hover);color:var(--ink)}
+.thumb .tact button.del:hover{color:var(--danger)}
+.thumb .tact svg{width:16px;height:16px}
+.thumb.dragging{opacity:.4}
+.thumb.drop-before::before,.thumb.drop-after::after{content:"";position:absolute;left:4px;right:4px;height:3px;border-radius:2px;background:var(--accent)}
+.thumb.drop-before::before{top:-9px}
+.thumb.drop-after::after{bottom:-9px}
+
+#workspace{overflow:auto;position:relative;min-width:0}
+#pages{display:flex;flex-direction:column;align-items:center;gap:26px;padding:28px 24px 120px;min-width:max-content}
+.pagewrap{display:flex;flex-direction:column;align-items:center;gap:6px}
+.pagewrap .plabel{font:500 11px var(--font-mono);color:var(--muted)}
+.page{position:relative;background:var(--paper);box-shadow:0 1px 2px var(--shadow),0 8px 28px var(--shadow)}
+.page canvas{position:absolute;inset:0;display:block}
+.page svg.overlay{position:absolute;inset:0;overflow:visible;touch-action:none}
+body[data-tool="select"] .page svg.overlay{touch-action:pan-x pan-y;pointer-events:none}
+body[data-tool="select"] .annot,body[data-tool="select"] .handle{pointer-events:visiblePainted}
+body[data-tool="select"] .annot{cursor:move}
+body[data-tool="text"] .page svg.overlay{cursor:text}
+body[data-tool="edittext"] .page svg.overlay{cursor:pointer}
+body[data-tool="highlight"] .page svg.overlay,body[data-tool="mask"] .page svg.overlay,body[data-tool="redact"] .page svg.overlay,body[data-tool="draw"] .page svg.overlay,
+body[data-tool="check"] .page svg.overlay,body[data-tool="cross"] .page svg.overlay,body[data-tool="signature"] .page svg.overlay,
+body[data-tool="image"] .page svg.overlay{cursor:crosshair}
+.handle{cursor:nwse-resize}
+.selbox rect{fill:none;stroke:var(--sel)}
+.selbox .handle{fill:var(--sel);stroke:var(--paper)}
+.hoverbox{fill:rgba(31,115,216,.12);stroke:var(--sel)}
+.redactmark{stroke:#e5484d}
+.forms{position:absolute;inset:0;pointer-events:none}
+.forms > *{position:absolute;pointer-events:auto;margin:0;border:0;border-bottom:1px solid var(--field-line);background:var(--field);color:var(--paper-ink);padding:0 3px;border-radius:2px;color-scheme:light}
+.forms textarea{resize:none;line-height:1.15}
+.forms input[type=checkbox],.forms input[type=radio]{accent-color:var(--sel);border:0;padding:0}
+body:not([data-tool="select"]) .forms > *{pointer-events:none}
+textarea.editor{position:absolute;z-index:3;margin:0;padding:0;border:0;outline:1.5px dashed var(--sel);outline-offset:3px;background:transparent;resize:none;overflow:hidden;white-space:pre;line-height:1.2;color-scheme:light}
+
+#empty{position:absolute;inset:0;display:grid;place-items:center;padding:24px}
+#empty .drop{width:min(640px,100%);border:2px dashed var(--line);border-radius:16px;padding:36px 32px;background:var(--panel);display:grid;gap:18px}
+#empty.over .drop{border-color:var(--accent);background:var(--accent-soft)}
+#empty h1{margin:0;font-size:26px;letter-spacing:-.02em;text-wrap:balance}
+#empty p{margin:0;color:var(--muted);max-width:60ch}
+#empty .actions{display:flex;flex-wrap:wrap;gap:8px}
+#empty .actions .btn{height:40px;padding:0 16px;border-color:var(--line)}
+#empty ul{margin:0;padding:0;list-style:none;display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px 18px;font-size:13px}
+#empty li{display:flex;gap:8px;align-items:flex-start}
+#empty li svg{color:var(--accent);margin-top:1px}
+#empty .note{font-size:12px}
+
+#status{display:flex;gap:14px;align-items:center;border-top:1px solid var(--line);background:var(--panel);font:12px var(--font-mono);color:var(--muted);
+  padding-block:5px;padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px));white-space:nowrap;overflow:hidden}
+#status .dirty{color:var(--danger)}
+#status svg{width:13px;height:13px;vertical-align:-2px;color:var(--accent)}
+#status .file{overflow:hidden;text-overflow:ellipsis}
+
+#toast{position:fixed;left:50%;bottom:calc(44px + env(safe-area-inset-bottom, 0px));transform:translateX(-50%);background:var(--ink);color:var(--panel);padding:9px 16px;border-radius:8px;font-size:13px;z-index:50;max-width:min(560px,calc(100% - 32px));box-shadow:0 6px 24px var(--shadow)}
+#busy{position:fixed;inset:0;display:grid;place-items:center;background:color-mix(in srgb,var(--ground) 60%,transparent);z-index:60}
+#busy div{background:var(--panel);border:1px solid var(--line);padding:14px 20px;border-radius:10px;font-weight:500}
+
+dialog{border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--ink);padding:0;width:min(600px,calc(100% - 32px));box-shadow:0 20px 60px var(--shadow)}
+dialog::backdrop{background:rgba(10,20,18,.45)}
+.dlg{display:grid;gap:14px;padding:20px}
+.dlg h2{margin:0;font-size:18px}
+.dlg footer{display:flex;justify-content:flex-end;gap:8px}
+.dlg footer .btn{border-color:var(--line)}
+.dlg .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.tabs{display:inline-flex;border:1px solid var(--line);border-radius:8px;padding:2px;gap:2px;width:max-content}
+.tabs button{border:0;background:none;padding:5px 12px;border-radius:6px;cursor:pointer}
+.tabs button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+#sigPad,#sigTypeCanvas{width:100%;height:180px;background:#fff;border:1px solid var(--line);border-radius:8px;touch-action:none;display:block}
+#sigPad{cursor:crosshair}
+#sigText,#extractInput{height:38px;border:1px solid var(--line);border-radius:8px;background:var(--ground);padding:0 10px;width:100%}
+#sigSaved{display:flex;flex-wrap:wrap;gap:8px}
+#sigSaved .saved{position:relative;background:#fff;border:1px solid var(--line);border-radius:8px;padding:4px;cursor:pointer;height:54px}
+#sigSaved .saved img{height:44px;display:block}
+#sigSaved .saved button{position:absolute;top:-8px;right:-8px;width:20px;height:20px;border-radius:50%;border:1px solid var(--line);background:var(--panel);cursor:pointer;font-size:12px;line-height:1;padding:0}
+.small{font-size:12px;color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+/* Menus déroulants et groupes d'outils */
+.menu{position:fixed;z-index:40;min-width:240px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px;box-shadow:0 10px 30px var(--shadow);display:grid}
+.menu button{display:flex;align-items:center;gap:8px;text-align:left;border:0;background:none;padding:8px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.menu button:hover:not(:disabled),.menu button:focus-visible{background:var(--hover)}
+.menu button:disabled{opacity:.45;cursor:default}
+.menu button[aria-checked="true"]{color:var(--accent);font-weight:600}
+.menu hr{border:0;border-top:1px solid var(--line);margin:5px 4px}
+#tools{display:flex;flex-wrap:wrap;gap:4px}
+.tgroup{display:inline-flex;align-items:center}
+.tgroup .tool{border-top-right-radius:0;border-bottom-right-radius:0;padding-right:6px}
+.tgroup .caret{height:34px;padding:0 3px;border:1px solid transparent;border-radius:0 7px 7px 0;background:transparent;cursor:pointer;color:var(--muted);display:grid;place-items:center}
+.tgroup .caret:hover{background:var(--hover);color:var(--ink)}
+.tgroup .caret svg{width:14px;height:14px}
+.tgroup .tool[aria-pressed="true"] + .caret{background:var(--accent-soft);color:var(--accent)}
+/* Barre latérale à onglets */
+.sidetabs{display:flex;gap:2px;margin:0 0 12px;border-bottom:1px solid var(--line)}
+.sidetabs button{flex:1;border:0;background:none;padding:6px 2px 8px;font-size:12px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap}
+.sidetabs button[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.pane .empty{color:var(--muted);font-size:12px;line-height:1.5}
+.otree{list-style:none;margin:0;padding:0;font-size:12.5px}
+.otree ul{list-style:none;margin:0;padding-left:12px}
+.otree button{display:block;width:100%;text-align:left;border:0;background:none;padding:4px 6px;border-radius:5px;cursor:pointer;color:var(--ink);overflow:hidden;text-overflow:ellipsis}
+.otree button:hover{background:var(--hover)}
+.note-item{display:block;width:100%;text-align:left;border:1px solid var(--line);background:var(--ground);border-radius:8px;padding:7px 8px;margin-bottom:8px;cursor:pointer;font-size:12px;color:var(--ink)}
+.note-item:hover{border-color:var(--accent)}
+.note-item b{display:flex;justify-content:space-between;gap:6px;font-size:11px;color:var(--muted);font-weight:500;margin-bottom:3px}
+.note-item span{display:block;white-space:pre-wrap;overflow-wrap:anywhere}
+/* Recherche */
+#findbar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);box-shadow:0 2px 8px var(--shadow)}
+#findInput{height:32px;width:min(320px,100%);border:1px solid var(--line);border-radius:7px;background:var(--ground);padding:0 10px}
+#findbar label{display:inline-flex;align-items:center;gap:4px}
+.hit{fill:rgba(255,170,0,.35);pointer-events:none}
+.hit.cur{fill:rgba(255,120,0,.6);stroke:#e05d00;stroke-width:1.5}
+/* Notes */
+#notePop{position:absolute;z-index:4;width:250px;background:#fff8c4;color:#2b2610;border:1px solid #d8c66a;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.25);padding:8px;display:grid;gap:6px;color-scheme:light}
+#notePop textarea{width:100%;min-height:90px;border:0;background:transparent;resize:vertical;font:13px/1.4 var(--font-ui);color:inherit;outline:none}
+#notePop .meta{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#6b6130}
+#notePop button{border:0;background:none;color:#8a2c1d;cursor:pointer;font-size:12px}
+.fieldlabel{font:600 8px var(--font-ui);fill:#1f73d8;pointer-events:none}
+.decor{pointer-events:none}
+.cropshade{fill:rgba(20,30,28,.45);pointer-events:none}
+.cropline{fill:none;stroke:var(--sel);pointer-events:none}
+/* Boîte de dialogue générique */
+.form{display:grid;gap:10px}
+.form .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.form .three{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.form label.f{display:grid;gap:4px;font-size:13px;color:var(--muted)}
+.form input:not([type=checkbox]):not([type=radio]):not([type=color]):not([type=range]),.form select,.form textarea{height:36px;border:1px solid var(--line);border-radius:7px;background:var(--ground);padding:0 10px;color:var(--ink);width:100%}
+.form textarea{height:auto;padding:8px 10px;resize:vertical}
+.form .check{display:flex;align-items:flex-start;gap:8px;font-size:13px}
+.form .check input{margin-top:3px}
+.form .check small{display:block;color:var(--muted)}
+.form fieldset{border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:grid;gap:8px;margin:0}
+.form legend{font-size:12px;color:var(--muted);padding:0 4px}
+.form .info{background:var(--ground);border-radius:8px;padding:10px 12px;font-size:13px;line-height:1.55}
+.form .info b{font-weight:600}
+.form table{border-collapse:collapse;font-size:13px;width:100%}
+.form td{padding:4px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+.form td:first-child{color:var(--muted);white-space:nowrap;width:40%}
+.progress{height:6px;border-radius:4px;background:var(--line);overflow:hidden}
+.progress div{height:100%;width:0;background:var(--accent);transition:width .2s}
+#dlg .err{color:var(--danger);margin:0;min-height:0}
+#dlg{width:min(640px,calc(100% - 32px))}
+.diff-add{fill:rgba(40,180,90,.35);pointer-events:none}
+.diff-del{fill:rgba(220,50,40,.30);pointer-events:none}
+
+@media (max-width: 760px){
+  main{grid-template-columns:1fr}
+  #side{display:none}
+  .tool .lbl,.fileact .lbl,.brand .name{display:none}
+  #props{margin-left:0;width:100%}
+}
+@media (prefers-reduced-motion: reduce){ *{transition:none!important} }
+</style>
+</head>
+<body data-tool="select">
+<div id="app">
+  <header class="bar">
+    <div class="brand"><span class="mark" aria-hidden="true"></span><span class="name">Atelier PDF</span></div>
+    <button class="btn fileact" id="btnOpen" title="Ouvrir un PDF ou des images (Ctrl+O)"><i data-icon="open"></i><span class="lbl">Ouvrir</span></button>
+    <button class="btn fileact needdoc" id="btnAdd" title="Ajouter un autre PDF ou des images à la fin (fusion)"><i data-icon="merge"></i><span class="lbl">Fusionner</span></button>
+    <button class="btn fileact needdoc" data-menu="mPages" aria-haspopup="menu" title="Insérer, extraire, diviser, recadrer des pages"><i data-icon="pages"></i><span class="lbl">Pages</span><i data-icon="caret"></i></button>
+    <button class="btn fileact needdoc" data-menu="mTools" aria-haspopup="menu" title="En-tête, filigrane, OCR, protection, nettoyage, compression, export"><i data-icon="tools"></i><span class="lbl">Outils</span><i data-icon="caret"></i></button>
+    <span class="spacer"></span>
+    <button class="btn icon needdoc" id="btnFind" title="Rechercher (Ctrl+F)" aria-label="Rechercher"><i data-icon="search"></i></button>
+    <button class="btn icon needdoc" id="btnPrint" title="Imprimer (Ctrl+P)" aria-label="Imprimer"><i data-icon="print"></i></button>
+    <span class="sep"></span>
+    <button class="btn icon" id="btnUndo" title="Annuler (Ctrl+Z)" aria-label="Annuler"><i data-icon="undo"></i></button>
+    <button class="btn icon" id="btnRedo" title="Rétablir (Ctrl+Y)" aria-label="Rétablir"><i data-icon="redo"></i></button>
+    <span class="sep"></span>
+    <button class="btn icon needdoc" id="btnZoomOut" title="Dézoomer" aria-label="Dézoomer"><i data-icon="minus"></i></button>
+    <button class="btn needdoc zoomval" id="btnZoomFit" title="Ajuster à la largeur">100 %</button>
+    <button class="btn icon needdoc" id="btnZoomIn" title="Zoomer" aria-label="Zoomer"><i data-icon="plus"></i></button>
+    <span class="sep"></span>
+    <button class="btn primary needdoc" id="btnSave" title="Enregistrer le PDF modifié (Ctrl+S)"><i data-icon="save"></i><span>Enregistrer</span></button>
+  </header>
+  <div class="bar toolrow">
+    <div role="toolbar" aria-label="Outils" id="tools"></div>
+    <div id="props"></div>
+  </div>
+  <main>
+    <aside id="side" aria-label="Panneau latéral">
+      <div class="sidetabs" role="tablist">
+        <button role="tab" data-pane="thumbs" aria-selected="true">Pages <span id="pageCount"></span></button>
+        <button role="tab" data-pane="outline" aria-selected="false">Signets</button>
+        <button role="tab" data-pane="comments" aria-selected="false">Notes <span id="noteCount"></span></button>
+      </div>
+      <div id="thumbs" class="pane"></div>
+      <div id="outline" class="pane" hidden></div>
+      <div id="comments" class="pane" hidden></div>
+    </aside>
+    <section id="workspace">
+      <div id="findbar" hidden>
+        <input id="findInput" type="search" placeholder="Rechercher dans le document" autocomplete="off" aria-label="Rechercher">
+        <span id="findCount" class="small"></span>
+        <button class="btn icon" id="findPrev" title="Précédent (Maj+Entrée)" aria-label="Résultat précédent"><i data-icon="up"></i></button>
+        <button class="btn icon" id="findNext" title="Suivant (Entrée)" aria-label="Résultat suivant"><i data-icon="down"></i></button>
+        <label class="small"><input type="checkbox" id="findCase"> Respecter la casse</label>
+        <label class="small"><input type="checkbox" id="findWord"> Mot entier</label>
+        <button class="btn" id="findHighlight" title="Surligner tous les résultats">Tout surligner</button>
+        <button class="btn danger" id="findRedact" title="Marquer tous les résultats pour le caviardage">Tout caviarder</button>
+        <button class="btn icon" id="findClose" title="Fermer (Échap)" aria-label="Fermer la recherche"><i data-icon="x"></i></button>
+      </div>
+      <div id="pages"></div>
+      <div id="empty">
+        <div class="drop">
+          <h1>Modifiez vos PDF, gratuitement et sans envoi en ligne</h1>
+          <p>Glissez un PDF ici, ou ouvrez-en un. Vos fichiers restent sur votre ordinateur : tout se passe dans le navigateur.</p>
+          <div class="actions">
+            <button class="btn primary" id="emptyOpen"><i data-icon="open"></i>Ouvrir un PDF</button>
+            <button class="btn" id="emptySample"><i data-icon="blank"></i>Essayer avec un exemple</button>
+          </div>
+          <ul>
+            <li><i data-icon="text"></i>Ajouter et modifier du texte</li>
+            <li><i data-icon="note"></i>Notes, surlignage, formes, tampons</li>
+            <li><i data-icon="sign"></i>Signer, remplir et créer des formulaires</li>
+            <li><i data-icon="redact"></i>Caviarder pour de bon</li>
+            <li><i data-icon="search"></i>Rechercher, reconnaître le texte (OCR)</li>
+            <li><i data-icon="merge"></i>Fusionner, diviser, recadrer, numéroter</li>
+            <li><i data-icon="lock"></i>Protéger, analyser, nettoyer</li>
+            <li><i data-icon="print"></i>Compresser, imprimer, exporter</li>
+          </ul>
+          <p class="note small" id="libNote"></p>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer id="status"><span id="stPage">Aucun document</span><span id="stFormat"></span><span class="file" id="stFile"></span><span class="spacer"></span><span id="stDirty"></span></footer>
+</div>
+
+<input type="file" id="fileOpen" accept="application/pdf,.pdf,image/png,image/jpeg,image/webp" multiple hidden>
+<input type="file" id="fileAdd" accept="application/pdf,.pdf,image/png,image/jpeg,image/webp" multiple hidden>
+<input type="file" id="fileImage" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+<input type="file" id="fileInsert" accept="application/pdf,.pdf,image/png,image/jpeg,image/webp" multiple hidden>
+<input type="file" id="fileCompare" accept="application/pdf,.pdf" hidden>
+<div class="menu" id="mPages" role="menu" hidden>
+  <button role="menuitem" id="btnInsert">Insérer un fichier après cette page…</button>
+  <button role="menuitem" id="btnBlank">Insérer une page blanche</button>
+  <button role="menuitem" id="btnDup">Dupliquer cette page</button>
+  <hr>
+  <button role="menuitem" id="btnExtract">Extraire des pages…</button>
+  <button role="menuitem" id="btnSplit">Diviser le document…</button>
+  <button role="menuitem" id="btnDelPages">Supprimer des pages…</button>
+  <hr>
+  <button role="menuitem" id="btnRotAll">Faire pivoter toutes les pages</button>
+  <button role="menuitem" id="btnCrop">Recadrer les pages…</button>
+</div>
+<div class="menu" id="mTools" role="menu" hidden>
+  <button role="menuitem" id="btnHeader">En-tête, pied de page et numéros…</button>
+  <button role="menuitem" id="btnWatermark">Filigrane…</button>
+  <hr>
+  <button role="menuitem" id="btnOcr">Reconnaître le texte (OCR)…</button>
+  <button role="menuitem" id="btnCompare">Comparer avec un autre PDF…</button>
+  <hr>
+  <button role="menuitem" id="btnProtect">Protéger par mot de passe…</button>
+  <button role="menuitem" id="btnClean">Analyser et nettoyer le document…</button>
+  <button role="menuitem" id="btnCompress">Enregistrer une copie compressée…</button>
+  <hr>
+  <button role="menuitem" id="btnProps">Propriétés du document…</button>
+  <button role="menuitem" id="btnExportImg">Exporter les pages en images…</button>
+  <button role="menuitem" id="btnExportTxt">Exporter le texte…</button>
+</div>
+<div class="menu" id="mGroup" role="menu" hidden></div>
+<div id="toast" hidden></div>
+<div id="busy" hidden><div id="busyText">Chargement…</div></div>
+
+<dialog id="sigDlg">
+  <form method="dialog" class="dlg" id="sigForm">
+    <h2>Votre signature</h2>
+    <div class="tabs" id="sigTabs"><button type="button" data-tab="draw" aria-pressed="true">Dessiner</button><button type="button" data-tab="type" aria-pressed="false">Écrire</button></div>
+    <div id="sigDrawPane"><canvas id="sigPad"></canvas><p class="small">Signez avec la souris, le pavé tactile ou le doigt.</p></div>
+    <div id="sigTypePane" hidden>
+      <input id="sigText" placeholder="Tapez votre nom" autocomplete="name">
+      <canvas id="sigTypeCanvas" style="margin-top:8px"></canvas>
+    </div>
+    <div class="row">
+      <span class="small">Encre</span>
+      <span class="swatches" id="sigColors">
+        <button type="button" class="swatch" data-c="#111111" style="background:#111111" aria-label="Noir" aria-pressed="true"></button>
+        <button type="button" class="swatch" data-c="#1a3fb8" style="background:#1a3fb8" aria-label="Bleu" aria-pressed="false"></button>
+      </span>
+      <span class="spacer"></span>
+      <button type="button" class="btn" id="sigClear">Effacer</button>
+    </div>
+    <div id="sigSavedWrap" hidden><p class="small" style="margin:0 0 8px">Signatures enregistrées sur cet ordinateur</p><div id="sigSaved"></div></div>
+    <footer><button class="btn" value="cancel">Annuler</button><button class="btn primary" id="sigUse" value="ok">Utiliser cette signature</button></footer>
+  </form>
+</dialog>
+
+<dialog id="dlg">
+  <form method="dialog" class="dlg" id="dlgForm">
+    <h2 id="dlgTitle"></h2>
+    <div id="dlgBody" class="form"></div>
+    <p class="small err" id="dlgErr"></p>
+    <footer><button class="btn" value="cancel" id="dlgCancel">Annuler</button><button class="btn primary" id="dlgOk" value="ok">OK</button></footer>
+  </form>
+</dialog>
+<div id="notePop" hidden><textarea aria-label="Texte de la note" placeholder="Votre commentaire…"></textarea><div class="meta"><span id="noteMeta"></span><button type="button" id="noteDel">Supprimer</button></div></div>
+
+<dialog id="extractDlg">
+  <form method="dialog" class="dlg" id="extractForm">
+    <h2>Extraire des pages</h2>
+    <p class="small" style="margin:0">Indiquez les pages à garder, dans l'ordre voulu. Exemples : <code>1-3, 5</code> ou <code>8-10</code>. Le document actuel compte <b id="extractCount">0</b> pages. Vos annotations sont conservées.</p>
+    <input id="extractInput" placeholder="1-3, 5" autocomplete="off">
+    <p class="small" id="extractErr" style="margin:0;color:var(--danger)"></p>
+    <footer><button class="btn" value="cancel">Annuler</button><button class="btn primary" id="extractGo" value="ok">Enregistrer ces pages</button></footer>
+  </form>
+</dialog>
+
+<script defer src="js/app.js"></script>
+</body>
+</html>

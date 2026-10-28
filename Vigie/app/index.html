@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<!-- Aucun script ni style intégré, aucune connexion : la page ne fait qu'afficher ce que lui envoie Vigie -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Vigie</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 5 7.5v7.2c0 6.9 4.7 12.3 11 14.3 6.3-2 11-7.4 11-14.3V7.5z"/><circle cx="16" cy="15" r="4.2"/><path d="M16 4.8v4M16 21.2v6M7 15h4.6M20.4 15H25"/></svg>
+    <span>Vigie</span>
+  </div>
+  <div id="fwstate" class="pill"></div>
+  <div id="stats" class="stats"></div>
+  <span class="spacer"></span>
+  <span id="helper" class="pill dim" title="Les modifications du pare-feu passent par un assistant administrateur, autorisé une fois par session">Assistant administrateur : inactif</span>
+  <button class="btn ghost" id="btnJournal">Activité</button>
+  <button class="btn ghost icon" id="btnSettings" title="Réglages" aria-label="Réglages"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg></button>
+</header>
+<nav class="bar">
+  <div class="tabs" role="tablist">
+    <button role="tab" data-f="online" aria-selected="true">En ligne <b id="c-online">0</b></button>
+    <button role="tab" data-f="ports" aria-selected="false">Ports ouverts <b id="c-ports">0</b></button>
+    <button role="tab" data-f="blocked" aria-selected="false">Restreints <b id="c-blocked">0</b></button>
+    <button role="tab" data-f="all" aria-selected="false">Tous <b id="c-all">0</b></button>
+  </div>
+  <input id="search" type="search" placeholder="Rechercher un programme, une adresse, un port…" autocomplete="off">
+</nav>
+<main>
+  <section id="list" class="list" aria-label="Programmes"></section>
+  <aside id="detail" class="detail" aria-label="Détails"><div class="placeholder">Choisissez un programme pour voir ses connexions et agir.</div></aside>
+</main>
+<aside id="journal" class="journal" hidden>
+  <div class="jhead"><h2>Activité</h2><button class="btn ghost icon" id="jClose" aria-label="Fermer"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+  <div id="jList"></div>
+</aside>
+
+<dialog id="confirm">
+  <form method="dialog">
+    <h2 id="cTitle"></h2>
+    <p id="cText"></p>
+    <p id="cUac" class="small"></p>
+    <div class="actions"><button class="btn ghost" value="cancel">Annuler</button><button class="btn primary" value="ok" id="cOk">Confirmer</button></div>
+  </form>
+</dialog>
+<dialog id="settings">
+  <form method="dialog">
+    <h2>Réglages</h2>
+    <label class="check"><input type="checkbox" id="sPorts"><span>M'avertir quand un programme ouvre un port sur le réseau<small>Notification Windows pour chaque nouveau port accessible depuis d'autres appareils.</small></span></label>
+    <label class="check"><input type="checkbox" id="sInternet"><span>M'avertir quand un nouveau programme se connecte à Internet<small>Peut être fréquent au démarrage de Windows.</small></span></label>
+    <label class="check"><input type="checkbox" id="sDns"><span>Afficher le nom des serveurs distants<small>Interroge votre serveur DNS habituel (recherche inverse). Désactivez pour ne rien envoyer.</small></span></label>
+    <div class="actions"><button class="btn ghost" value="cancel">Annuler</button><button class="btn primary" value="ok">Enregistrer</button></div>
+  </form>
+</dialog>
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
