@@ -34,6 +34,21 @@ npm run dist       # construit l'installateur Windows dans dist/
 
 `npm start` copie d'abord les bibliothèques et polices dans `app/vendor/` (étape `vendor`).
 
+## Fabriquer l'installateur Windows
+
+`npm run dist` appelle **electron-builder** : il empaquette l'application avec le runtime Electron et produit un installateur **NSIS** dans le dossier `dist\`.
+
+```bash
+npm install
+npm run dist
+```
+
+Résultat : **`dist\Atelier PDF Setup 1.3.0.exe`**. Ce fichier installe Atelier PDF comme un vrai programme Windows — raccourcis menu Démarrer et bureau, entrée dans « Applications installées », désinstalleur propre. C'est lui qu'on publie dans les **Releases**.
+
+> - Si PowerShell bloque npm (« l'exécution de scripts est désactivée »), utilisez **`npm.cmd`** à la place de `npm`, ou autorisez les scripts : `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+> - Le premier build télécharge Electron (~100 Mo, mis en cache ensuite, donc les builds suivants sont rapides).
+> - L'exe n'est **pas signé** : SmartScreen avertit au premier lancement.
+
 ## Confidentialité et sécurité
 
 - Aucun envoi de données : tout le traitement se fait localement, sans connexion Internet.

@@ -30,13 +30,15 @@ Aperçu de l'interface seule (données fictives), dans un navigateur : ouvrir `a
 
 ## Construire l'exécutable
 
-Les dépendances de construction sont **figées avec leur empreinte** (`requirements-build.txt`) :
+Contrairement aux autres projets (Electron, qui produisent un installateur NSIS), Aware est en **Python** : `build.bat` utilise **PyInstaller** pour produire un **exe autonome et portable** — pas d'installation, on lance le fichier directement. Les dépendances de construction sont **figées avec leur empreinte** (`requirements-build.txt`) :
 
 ```bash
 build.bat
 ```
 
-Cela installe les dépendances vérifiées, génère l'icône et produit `dist\Aware.exe`, puis affiche son empreinte SHA-256.
+Cela installe les dépendances vérifiées, génère l'icône et produit **`dist\Aware.exe`**, puis affiche son empreinte SHA-256. Ce `.exe` se lance tel quel (ou se copie où l'on veut) ; c'est lui qu'on publie dans les **Releases**.
+
+> L'exe n'est **pas signé** : SmartScreen avertit au premier lancement.
 
 Tests de sécurité : `python tests/test_security.py`.
 

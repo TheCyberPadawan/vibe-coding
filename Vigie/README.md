@@ -29,6 +29,21 @@ npm run dist       # construit l'installateur Windows dans dist/
 
 Tests de sécurité (sans modifier le pare-feu) : `node scripts/test-security.js`.
 
+## Fabriquer l'installateur Windows
+
+`npm run dist` appelle **electron-builder** : il empaquette l'application avec le runtime Electron et produit un installateur **NSIS** dans le dossier `dist\`.
+
+```bash
+npm install
+npm run dist
+```
+
+Résultat : **`dist\Vigie Setup 1.0.0.exe`**. Ce fichier installe Vigie comme un vrai programme Windows — raccourcis menu Démarrer et bureau, entrée dans « Applications installées », désinstalleur propre. C'est lui qu'on publie dans les **Releases**.
+
+> - Si PowerShell bloque npm (« l'exécution de scripts est désactivée »), utilisez **`npm.cmd`** à la place de `npm`, ou autorisez les scripts : `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+> - Le premier build télécharge Electron (~100 Mo, mis en cache ensuite, donc les builds suivants sont rapides).
+> - L'exe n'est **pas signé** : SmartScreen avertit au premier lancement.
+
 ## Sécurité
 
 - L'interface ne modifie rien ; les règles passent par un **assistant administrateur isolé**, joint par un canal nommé protégé par un jeton secret et réservé à votre compte.
