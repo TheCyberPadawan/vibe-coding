@@ -1,7 +1,7 @@
 {
   "name": "atelier-pdf",
   "productName": "Atelier PDF",
-  "version": "1.3.0",
+  "version": "1.9.0",
   "description": "Éditeur PDF gratuit : texte, annotations, formulaires, signature, caviardage, OCR, protection, pages.",
   "author": "Atelier PDF",
   "license": "MIT",
@@ -15,6 +15,7 @@
     "@fontsource/dancing-script": "5.3.0",
     "@fontsource/ibm-plex-mono": "5.3.0",
     "@fontsource/instrument-sans": "5.3.0",
+    "@pdf-lib/fontkit": "1.1.1",
     "@tesseract.js-data/eng": "1.0.0",
     "@tesseract.js-data/fra": "1.0.0",
     "electron": "44.9.3",

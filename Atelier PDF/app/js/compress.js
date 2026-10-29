@@ -53,9 +53,15 @@ async function pixels(doc, s) {
   return { W, H, kind: 'flate', img: c, n, photo: W * H > 250000 };
 }
 
-async function compress(bytes, level = 'moyenne', onProgress) {
+// opts.strip : retire aussi vignettes, fiche XMP et données privées d'autres logiciels (sans effet sur l'affichage)
+async function compress(bytes, level = 'moyenne', onProgress, opts = {}) {
   const P = PRESETS[level] || PRESETS.moyenne;
   const doc = await L.PDFDocument.load(bytes, { updateMetadata: false }), ctx = doc.context;
+  if (opts.strip) {
+    doc.getPages().forEach(p => p.node.delete(N('Thumb')));
+    doc.catalog.delete(N('Metadata'));
+    for (const [, o] of ctx.enumerateIndirectObjects()) { const d = o instanceof PDFDict ? o : o instanceof PDFStream ? o.dict : null; d?.delete(N('PieceInfo')); }
+  }
   const maxIn = Math.max(...doc.getPages().map(p => { const { width, height } = p.getSize(); return Math.max(width, height) / 72; }));
   const limit = Math.ceil(maxIn * P.dpi);
   const images = ctx.enumerateIndirectObjects().filter(([, o]) => o instanceof PDFRawStream && o.dict.lookup(N('Subtype'))?.decodeText?.() === 'Image');
@@ -81,6 +87,16 @@ async function compress(bytes, level = 'moyenne', onProgress) {
     const newLen = ns instanceof PDFRawStream ? ns.contents.length : ns.getContents().length;
     if (newLen < s.contents.length * 0.9) { ctx.assign(ref, ns); saved += s.contents.length - newLen; touched++; }
   }
+  // Flux laissés sans compression (contenu des pages, polices…) : compressés sans perte
+  let deflated = 0;
+  for (const [ref, o] of ctx.enumerateIndirectObjects()) {
+    if (!(o instanceof PDFRawStream) || o.dict.has(N('Filter')) || o.contents.length < 256) continue;
+    const type = o.dict.lookup(N('Type'))?.decodeText?.();
+    if (type === 'Metadata' || type === 'XRef') continue;   // la fiche XMP doit rester lisible
+    const ns = ctx.flateStream(o.contents);
+    for (const [k, v] of o.dict.entries()) if (!['Length', 'Filter', 'DecodeParms'].includes(k.decodeText())) ns.dict.set(k, v);
+    if (ns.getContents().length < o.contents.length * 0.9) { saved += o.contents.length - ns.getContents().length; ctx.assign(ref, ns); deflated++; }
+  }
   // Flux identiques (logos répétés, polices en double après une fusion) : une seule copie
   const byKey = new Map(), alias = new Map();
   const hash = async b => new Uint8Array(await crypto.subtle.digest('SHA-256', b)).slice(0, 12).join(',');
@@ -97,7 +113,7 @@ async function compress(bytes, level = 'moyenne', onProgress) {
     };
     for (const [, o] of ctx.enumerateIndirectObjects()) fix(o);
   }
-  return { bytes: await doc.save({ useObjectStreams: true }), images: touched, saved, duplicates: alias.size };
+  return { bytes: await doc.save({ useObjectStreams: true }), images: touched, saved, duplicates: alias.size, deflated };
 }
 
 return { compress, PRESETS };

@@ -7,8 +7,11 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Atelier PDF</title>
 <link rel="stylesheet" href="vendor/fonts/fonts.css">
+<link rel="stylesheet" href="fonts/fonts.css">
 <script type="module" src="js/pdfjs.mjs"></script>
 <script src="vendor/pdf-lib.min.js"></script>
+<script src="vendor/fontkit.umd.min.js"></script>
+<script src="js/layer.js"></script>
 <script src="js/redact.js"></script>
 <script src="js/pdfcrypt.js"></script>
 <script src="js/sanitize.js"></script>
@@ -116,6 +119,14 @@ body[data-tool="image"] .page svg.overlay{cursor:crosshair}
 .selbox rect{fill:none;stroke:var(--sel)}
 .selbox .handle{fill:var(--sel);stroke:var(--paper)}
 .hoverbox{fill:rgba(31,115,216,.12);stroke:var(--sel)}
+.guide{stroke:#e0247a;pointer-events:none}
+.cropframe{stroke:var(--sel);pointer-events:none}
+body .page svg.overlay .annot image{cursor:inherit}
+.textlink{stroke:#1f73d8;stroke-dasharray:2 2;pointer-events:none}
+.gapmark{fill:rgba(224,36,122,.14);stroke:#e0247a;stroke-dasharray:3 2;pointer-events:none}
+.marquee{fill:rgba(31,115,216,.08);stroke:var(--sel);stroke-dasharray:4 3;pointer-events:none}
+.aligns{display:inline-flex;align-items:center;gap:2px;padding-inline:6px;border-inline:1px solid var(--line)}
+.aligns .hint{margin-right:6px}
 .redactmark{stroke:#e5484d}
 .forms{position:absolute;inset:0;pointer-events:none}
 .forms > *{position:absolute;pointer-events:auto;margin:0;border:0;border-bottom:1px solid var(--field-line);background:var(--field);color:var(--paper-ink);padding:0 3px;border-radius:2px;color-scheme:light}
@@ -342,7 +353,7 @@ dialog::backdrop{background:rgba(10,20,18,.45)}
   <hr>
   <button role="menuitem" id="btnProtect">Protéger par mot de passe…</button>
   <button role="menuitem" id="btnClean">Analyser et nettoyer le document…</button>
-  <button role="menuitem" id="btnCompress">Enregistrer une copie compressée…</button>
+  <button role="menuitem" id="btnCompress">Réduire la taille du PDF…</button>
   <hr>
   <button role="menuitem" id="btnProps">Propriétés du document…</button>
   <button role="menuitem" id="btnExportImg">Exporter les pages en images…</button>

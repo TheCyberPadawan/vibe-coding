@@ -29,6 +29,8 @@ for (const [family, pkg, weights] of FONTS) for (const w of weights) {
 }
 fs.writeFileSync(path.join(out, 'fonts', 'fonts.css'), css);
 fs.copyFileSync(nm('pdf-lib/dist/pdf-lib.min.js'), path.join(out, 'pdf-lib.min.js'));
+// Intégration des polices de app/fonts dans les PDF
+fs.copyFileSync(nm('@pdf-lib/fontkit/dist/fontkit.umd.min.js'), path.join(out, 'fontkit.umd.min.js'));
 // OCR : moteur (versions LSTM, WebAssembly intégré) et modèles français et anglais
 const tess = path.join(out, 'tesseract');
 fs.mkdirSync(path.join(tess, 'lang'), { recursive: true });

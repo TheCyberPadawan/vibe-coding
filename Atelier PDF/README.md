@@ -4,19 +4,21 @@
 
 ## Fonctions
 
-- **Texte** : ajouter du texte, et modifier un texte existant du PDF.
-- **Annotations** : surligner, souligner, barrer, notes, rectangles, ellipses, lignes, flèches, dessin à main levée, tampons (Approuvé, Confidentiel…).
+- **Texte** : ajouter du texte, et modifier un texte existant du PDF. Polices intégrées (Instrument Serif, Manrope, Fira Code) en plus des polices standard, avec gras, italique, interligne et espacement des lettres.
+- **Sélection multiple et alignement** : Maj+clic, cadre tiré dans le vide ou Ctrl+A ; aligner à gauche, au centre, à droite, en haut, au milieu, en bas ou sur la ligne de base des textes, répartir à espaces égaux, centrer sur la page. Repères magnétiques pendant le déplacement (bords, centres, lignes de base, centre de la page, espacements égaux entre blocs voisins signalés par deux rectangles roses ; Ctrl pour les ignorer). Alt + glisser déplace une copie. Les réglages de police s'appliquent à tous les textes sélectionnés.
+- **Ajouts toujours modifiables** : textes, images, formes et dessins ajoutés avec Atelier PDF redeviennent modifiables quand on rouvre le fichier (déplacer, réécrire, copier-coller avec Ctrl+C / Ctrl+V, dupliquer avec Ctrl+D, ajuster aux flèches). Ils restent visibles normalement dans tous les autres lecteurs PDF.
+- **Annotations** : surligner, souligner, barrer, notes, rectangles (coins arrondis, avec ou sans contour), ellipses, lignes, flèches, dessin à main levée, tampons (Approuvé, Confidentiel…).
 - **Signature** : dessinée ou tapée.
-- **Images** et **formulaires** : remplir les champs, et en créer de nouveaux.
+- **Images** et **formulaires** : remplacer une image en gardant son cadre, puis choisir le cadrage par double-clic (glisser, molette pour zoomer) ; remplir les champs, et en créer de nouveaux.
 - **Caviardage réel** : supprime vraiment le contenu sous la zone (vectoriel, avec repli en image), puis **vérifie** le résultat avant d'enregistrer. Recherche + « tout caviarder ».
-- **Liens** vers une page ou une adresse web.
+- **Liens** vers une page ou une adresse web, en zone libre ou posés sur un texte (le lien suit le texte quand on le déplace).
 - **Pages** : fusionner, diviser, extraire, insérer, dupliquer, pivoter, recadrer, supprimer.
 - **Mise en page** : en-têtes, pieds de page, numéros, filigrane.
 - **OCR** (français / anglais, hors ligne) pour rendre un scan cherchable.
 - **Recherche** dans le document.
 - **Protection par mot de passe** (chiffrement AES-256) et ouverture des PDF protégés.
 - **Analyser et nettoyer** : métadonnées, JavaScript, pièces jointes, versions antérieures.
-- **Compression**, **comparaison** de deux PDF, **export** images / texte, **impression**.
+- **Réduire la taille** (images à 200, 150 ou 96 ppp, compression sans perte des flux, retrait des vignettes et données inutiles), **comparaison** de deux PDF, **export** images / texte, **impression**.
 
 ## Installation
 
@@ -34,21 +36,6 @@ npm run dist       # construit l'installateur Windows dans dist/
 
 `npm start` copie d'abord les bibliothèques et polices dans `app/vendor/` (étape `vendor`).
 
-## Fabriquer l'installateur Windows
-
-`npm run dist` appelle **electron-builder** : il empaquette l'application avec le runtime Electron et produit un installateur **NSIS** dans le dossier `dist\`.
-
-```bash
-npm install
-npm run dist
-```
-
-Résultat : **`dist\Atelier PDF Setup 1.3.0.exe`**. Ce fichier installe Atelier PDF comme un vrai programme Windows — raccourcis menu Démarrer et bureau, entrée dans « Applications installées », désinstalleur propre. C'est lui qu'on publie dans les **Releases**.
-
-> - Si PowerShell bloque npm (« l'exécution de scripts est désactivée »), utilisez **`npm.cmd`** à la place de `npm`, ou autorisez les scripts : `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
-> - Le premier build télécharge Electron (~100 Mo, mis en cache ensuite, donc les builds suivants sont rapides).
-> - L'exe n'est **pas signé** : SmartScreen avertit au premier lancement.
-
 ## Confidentialité et sécurité
 
 - Aucun envoi de données : tout le traitement se fait localement, sans connexion Internet.
@@ -57,7 +44,9 @@ Résultat : **`dist\Atelier PDF Setup 1.3.0.exe`**. Ce fichier installe Atelier 
 
 ## Technique
 
-Electron · [pdf.js](https://github.com/mozilla/pdf.js) · [pdf-lib](https://github.com/Hopding/pdf-lib) · [tesseract.js](https://github.com/naptha/tesseract.js). Chiffrement PDF maison vérifié contre pypdf et qpdf.
+Electron · [pdf.js](https://github.com/mozilla/pdf.js) · [pdf-lib](https://github.com/Hopding/pdf-lib) · [fontkit](https://github.com/Hopding/fontkit) · [tesseract.js](https://github.com/naptha/tesseract.js). Chiffrement PDF maison vérifié contre pypdf et qpdf. Polices de `app/fonts` sous licence SIL Open Font License.
+
+Les ajouts réouvrables sont dessinés dans un flux de contenu à part ; leur description (JSON compressé) est rangée dans un flux `/AtelierLayer` relié à la page par la clé `/AtelierPDF`. À l'ouverture, ce flux est retiré de la page et chaque élément est vérifié champ par champ avant d'être réaffiché. Rien de ce qui est caviardé n'entre dans cette description. Tests : `ATELIER_SMOKE=1 ATELIER_SMOKE_JS=scripts/test-layer.js electron .` et `scripts/test-align.js` (sélection multiple, alignement, aimantation).
 
 ## Licence
 

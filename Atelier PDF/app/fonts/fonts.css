@@ -1,0 +1,10 @@
+/* Polices proposées pour les textes ajoutés au PDF (licence SIL Open Font License, voir OFL-*.txt).
+   Les mêmes fichiers sont intégrés au PDF à l'enregistrement : l'affichage et le fichier correspondent. */
+@font-face{font-family:"Instrument Serif";font-style:normal;font-weight:400;src:url(InstrumentSerif-Regular.ttf) format("truetype")}
+@font-face{font-family:"Instrument Serif";font-style:italic;font-weight:400;src:url(InstrumentSerif-Italic.ttf) format("truetype")}
+@font-face{font-family:"Manrope";font-style:normal;font-weight:300;src:url(Manrope-Light.ttf) format("truetype")}
+@font-face{font-family:"Manrope";font-style:normal;font-weight:400;src:url(Manrope-Regular.ttf) format("truetype")}
+@font-face{font-family:"Manrope";font-style:normal;font-weight:500;src:url(Manrope-Medium.ttf) format("truetype")}
+@font-face{font-family:"Manrope";font-style:normal;font-weight:700;src:url(Manrope-Bold.ttf) format("truetype")}
+@font-face{font-family:"Fira Code";font-style:normal;font-weight:400;src:url(FiraCode-Regular.ttf) format("truetype")}
+@font-face{font-family:"Fira Code";font-style:normal;font-weight:500;src:url(FiraCode-Medium.ttf) format("truetype")}

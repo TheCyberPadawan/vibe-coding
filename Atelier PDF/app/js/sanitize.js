@@ -112,7 +112,7 @@ function clean(doc, opts) {
   if (opts.outlines) { cat.delete(N('Outlines')); if (cat.lookup(N('PageMode'))?.decodeText?.() === 'UseOutlines') cat.delete(N('PageMode')); }
   if (opts.private) {
     eachDict(doc, d => { d.delete(N('PieceInfo')); d.delete(N('LastModified')); });
-    doc.getPages().forEach(p => p.node.delete(N('Thumb')));
+    doc.getPages().forEach(p => { p.node.delete(N('Thumb')); p.node.delete(N('AtelierPDF')); });   // calque modifiable d'Atelier PDF
     cat.delete(N('SpiderInfo'));
   }
 }
