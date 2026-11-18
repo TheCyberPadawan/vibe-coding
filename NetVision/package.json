@@ -1,7 +1,7 @@
 {
   "name": "netvision",
   "productName": "NetVision",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Cartographie du réseau local : découvre les appareils connectés et ce que l'on peut savoir d'eux. Sans droits administrateur.",
   "author": "NetVision",
   "license": "MIT",

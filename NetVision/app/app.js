@@ -52,10 +52,11 @@ function render() {
   const items = list();
   $("#map").hidden = S.view !== "map";
   $("#list").hidden = S.view !== "list";
+  $("#zoomctl").hidden = S.view !== "map";
   const empty = !items.length && !S.scanning;
   $("#empty").hidden = !empty;
   $("#stage").style.display = "";
-  if (empty) { $("#empty").innerHTML = S.q ? "<div>Aucun appareil ne correspond à la recherche.</div>" : "<div><h3>Aucun appareil trouvé</h3><p>Vérifiez que vous êtes connecté à un réseau, puis relancez un scan.</p></div>"; $("#map").hidden = $("#list").hidden = true; return; }
+  if (empty) { $("#empty").innerHTML = S.q ? "<div>Aucun appareil ne correspond à la recherche.</div>" : "<div><h3>Aucun appareil trouvé</h3><p>Vérifiez que vous êtes connecté à un réseau, puis relancez un scan.</p></div>"; $("#map").hidden = $("#list").hidden = $("#zoomctl").hidden = true; return; }
   if (S.view === "map") renderMap(items); else renderList(items);
 }
 function renderList(items) {
@@ -70,35 +71,86 @@ function renderList(items) {
       </div></div>`;
   }).join("");
 }
+/* La carte est dessinée à taille réelle dans un « monde » (anneaux aussi grands que nécessaire,
+   les appareils ne se chevauchent jamais), puis affichée avec un zoom et un décalage.
+   Tant que l'utilisateur n'a pas zoomé ni déplacé la carte, elle s'ajuste pour tout montrer. */
+const Z = { k: 1, tx: 0, ty: 0, auto: true, size: 0, min: 0.1, max: 3 };
+const RING0 = 130, RING_GAP = 115, SLOT = 105, MARGIN = 80;
+
+function layout(items) {
+  const gw = items.find(h => h.ip === S.meta?.gateway);
+  const others = items.filter(h => h !== gw);
+  const rings = [];
+  let i = 0;
+  for (let ring = 0; i < others.length; ring++) {
+    const r = RING0 + ring * RING_GAP, cap = Math.max(6, Math.floor(2 * Math.PI * r / SLOT));
+    const n = Math.min(cap, others.length - i);
+    rings.push({ r, from: i, n }); i += n;
+  }
+  const R = (rings.length ? rings[rings.length - 1].r : 0) + MARGIN;
+  const c = R, pos = new Map();
+  if (gw) pos.set(keyOf(gw), [c, c]);
+  rings.forEach(({ r, from, n }, ring) => {
+    for (let j = 0; j < n; j++) {
+      const a = (j / n) * Math.PI * 2 - Math.PI / 2 + (ring % 2 ? Math.PI / n : 0);
+      pos.set(keyOf(others[from + j]), [c + r * Math.cos(a), c + r * Math.sin(a)]);
+    }
+  });
+  return { pos, others, size: 2 * R, c, rings };
+}
+
 function renderMap(items) {
   const map = $("#map"), W = map.clientWidth, H = map.clientHeight;
   if (!W || !H) { requestAnimationFrame(() => render()); return; }
-  const cx = W / 2, cy = H / 2;
-  const gw = items.find(h => h.ip === S.meta?.gateway);
-  const others = items.filter(h => h !== gw);
-  const pos = new Map();
-  if (gw) pos.set(keyOf(gw), [cx, cy]);
-  // Anneaux concentriques autour de la box : 10 appareils max sur le premier, puis +6 par anneau
-  let i = 0, ring = 1;
-  while (i < others.length) {
-    const cap = 8 + ring * 6, n = Math.min(cap, others.length - i), r = Math.min(Math.min(W, H) / 2 - 70, 110 + (ring - 1) * 120);
-    for (let j = 0; j < n; j++) {
-      const a = (j / n) * Math.PI * 2 - Math.PI / 2 + (ring % 2 ? 0 : Math.PI / n);
-      pos.set(keyOf(others[i + j]), [cx + r * Math.cos(a), cy + r * Math.sin(a)]);
-    }
-    i += n; ring++;
-  }
-  const edges = others.map(h => { const p = pos.get(keyOf(h)); return p ? `<line class="edge" x1="${cx}" y1="${cy}" x2="${p[0]}" y2="${p[1]}"/>` : ""; }).join("");
+  const { pos, others, size, c, rings } = layout(items);
+  const guides = rings.map(g => `<circle class="ring" cx="${c}" cy="${c}" r="${g.r}"/>`).join("");
+  const edges = others.map(h => { const p = pos.get(keyOf(h)); return p ? `<line class="edge" x1="${c}" y1="${c}" x2="${p[0]}" y2="${p[1]}"/>` : ""; }).join("");
   const nodes = items.map(h => {
     const k = keyOf(h); if (!pos.has(k)) return "";
     const cls = [h.ip === S.meta?.gateway ? "gw" : "", h.self ? "self" : "", h.isNew ? "new" : "", k === S.sel ? "sel" : ""].join(" ");
     return `<div class="node ${cls}" data-k="${esc(k)}">
       <div class="disc">${icon(h.kind)}</div><div class="lbl">${esc(dispName(h))}</div><div class="sub">${esc(h.ip.split(".").pop())}</div></div>`;
   }).join("");
-  map.innerHTML = `<svg>${edges}</svg>${nodes}`;
-  // Positions posées par JS (la CSP interdit les attributs style= en ligne)
+  map.innerHTML = `<div class="world" id="world"><svg viewBox="0 0 ${size} ${size}">${guides}${edges}</svg>${nodes}</div>`;
+  // Positions et tailles posées par JS (la CSP interdit les attributs style= en ligne)
+  const world = $("#world"), svg = world.querySelector("svg");
+  world.style.width = world.style.height = svg.style.width = svg.style.height = size + "px";
   map.querySelectorAll(".node").forEach(n => { const p = pos.get(n.dataset.k); if (p) { n.style.left = p[0] + "px"; n.style.top = p[1] + "px"; } });
+  // Si la carte grandit pendant le scan, on garde le même point au centre de l'écran
+  if (!Z.auto && Z.size && size !== Z.size) { const d = (size - Z.size) / 2 * Z.k; Z.tx -= d; Z.ty -= d; }
+  Z.size = size;
+  applyZoom();
 }
+
+function fitScale() {
+  const map = $("#map"), W = map.clientWidth, H = map.clientHeight;
+  return Z.size ? Math.min(1, W / Z.size, H / Z.size) : 1;
+}
+function applyZoom() {
+  const map = $("#map"), world = $("#world");
+  if (!world) return;
+  const W = map.clientWidth, H = map.clientHeight, fit = fitScale();
+  Z.min = Math.min(fit, 0.25) * 0.8;
+  if (Z.auto) { Z.k = fit; Z.tx = (W - Z.size * Z.k) / 2; Z.ty = (H - Z.size * Z.k) / 2; }
+  // On ne laisse pas la carte sortir entièrement de l'écran
+  const s = Z.size * Z.k, keep = 120;
+  Z.tx = Math.min(W - keep, Math.max(keep - s, Z.tx));
+  Z.ty = Math.min(H - keep, Math.max(keep - s, Z.ty));
+  world.style.transform = `translate(${Z.tx}px, ${Z.ty}px) scale(${Z.k})`;
+  map.classList.toggle("far", Z.k < 0.55);
+  $("#zoomval").textContent = Math.round(Z.k * 100) + " %";
+  $("#zoomfit").disabled = Z.auto;
+}
+// Zoom autour d'un point de l'écran (le curseur, ou le centre de la carte)
+function zoomAt(factor, mx, my) {
+  const map = $("#map");
+  if (mx == null) { mx = map.clientWidth / 2; my = map.clientHeight / 2; }
+  const k = Math.min(Z.max, Math.max(Z.min, Z.k * factor));
+  if (k === Z.k) return;
+  Z.tx = mx - (mx - Z.tx) * k / Z.k; Z.ty = my - (my - Z.ty) * k / Z.k; Z.k = k; Z.auto = false;
+  applyZoom();
+}
+function zoomFit() { Z.auto = true; applyZoom(); }
 
 function renderDetail() {
   const h = S.sel && S.hosts.get(S.sel), box = $("#detail"), main = document.querySelector("main");
@@ -173,9 +225,53 @@ document.querySelectorAll(".views button").forEach(b => b.onclick = () => {
   S.view = b.dataset.view; document.querySelectorAll(".views button").forEach(x => x.setAttribute("aria-selected", x === b)); render();
 });
 $("#search").oninput = e => { S.q = e.target.value.trim(); render(); };
-$("#stage").onclick = e => { const n = e.target.closest("[data-k]"); if (n) { S.sel = n.dataset.k; renderDetail(); render(); } };
+let dragged = false;
+$("#stage").onclick = e => {
+  if (dragged) { dragged = false; return; }
+  const n = e.target.closest("[data-k]"); if (n) { S.sel = n.dataset.k; renderDetail(); render(); }
+};
 window.addEventListener("resize", () => { if (S.view === "map") renderMap(list()); });
-document.addEventListener("keydown", e => { if (e.key === "Escape" && S.sel) { S.sel = null; renderDetail(); render(); } });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && S.sel) { S.sel = null; renderDetail(); render(); return; }
+  if (S.view !== "map" || e.ctrlKey || e.altKey || e.metaKey || e.target.closest?.("input, textarea")) return;
+  if (e.key === "+" || e.key === "=") { zoomAt(1.25); e.preventDefault(); }
+  else if (e.key === "-") { zoomAt(1 / 1.25); e.preventDefault(); }
+  else if (e.key === "0") { zoomFit(); e.preventDefault(); }
+});
+
+/* ---------- Zoom et déplacement de la carte ---------- */
+{
+  const map = $("#map");
+  map.addEventListener("wheel", e => {
+    e.preventDefault();
+    const r = map.getBoundingClientRect();
+    // Pavé tactile (pincer) = petits pas avec Ctrl ; molette = pas réguliers
+    zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), e.clientX - r.left, e.clientY - r.top);
+  }, { passive: false });
+  let drag = null;
+  map.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
+    drag = { x: e.clientX, y: e.clientY, tx: Z.tx, ty: Z.ty, id: e.pointerId, moved: false };
+  });
+  map.addEventListener("pointermove", e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    if (!drag.moved) { drag.moved = true; map.setPointerCapture(drag.id); map.classList.add("panning"); }
+    Z.auto = false; Z.tx = drag.tx + dx; Z.ty = drag.ty + dy; applyZoom();
+  });
+  const end = e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (drag.moved) { dragged = true; setTimeout(() => { dragged = false; }, 0); }
+    map.classList.remove("panning"); drag = null;
+  };
+  map.addEventListener("pointerup", end);
+  map.addEventListener("pointercancel", end);
+  map.addEventListener("dblclick", e => { if (!e.target.closest("[data-k]")) zoomFit(); });
+  $("#zoomin").onclick = () => zoomAt(1.25);
+  $("#zoomout").onclick = () => zoomAt(1 / 1.25);
+  $("#zoomfit").onclick = zoomFit;
+}
 
 // État courant si la fenêtre est rouverte / au démarrage
 window.netvision.snapshot().then(s => {

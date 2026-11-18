@@ -30,6 +30,12 @@
 <main>
   <section id="stage" class="stage">
     <div id="map" class="map"></div>
+    <div id="zoomctl" class="zoomctl" role="group" aria-label="Zoom de la carte">
+      <button id="zoomout" title="Dézoomer (−)" aria-label="Dézoomer"><svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg></button>
+      <span id="zoomval" class="zoomval">100 %</span>
+      <button id="zoomin" title="Zoomer (+)" aria-label="Zoomer"><svg viewBox="0 0 24 24"><path d="M6 12h12M12 6v12"/></svg></button>
+      <button id="zoomfit" title="Tout afficher (0 ou double-clic)" aria-label="Tout afficher"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+    </div>
     <div id="list" class="list" hidden></div>
     <div id="empty" class="empty" hidden></div>
   </section>

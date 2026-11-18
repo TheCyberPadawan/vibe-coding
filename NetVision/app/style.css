@@ -51,9 +51,19 @@ main.open { grid-template-columns: 1fr minmax(360px, 420px); }
 .stage { position: relative; overflow: auto; min-width: 0; }
 
 /* Carte radiale */
-.map { position: relative; width: 100%; height: 100%; }
-.map svg { width: 100%; height: 100%; position: absolute; inset: 0; }
+.map { position: relative; width: 100%; height: 100%; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+.map.panning { cursor: grabbing; }
+.map .world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.map .world svg { position: absolute; left: 0; top: 0; overflow: visible; }
 .map .edge { stroke: var(--line); stroke-width: 1.2; }
+.map .ring { stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 6; opacity: .6; }
+.map.far .node .sub { visibility: hidden; }
+.zoomctl { position: absolute; right: 14px; bottom: 14px; display: flex; align-items: center; gap: 2px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.18); z-index: 5; }
+.zoomctl button { width: 30px; height: 30px; border: 0; border-radius: 7px; background: none; color: var(--muted); display: grid; place-items: center; }
+.zoomctl button:hover:not(:disabled) { background: var(--panel2); color: var(--text); }
+.zoomctl button:disabled { opacity: .35; cursor: default; }
+.zoomctl svg { width: 17px; height: 17px; }
+.zoomval { min-width: 48px; text-align: center; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .node { position: absolute; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; width: 96px; }
 .node .disc { width: 46px; height: 46px; border-radius: 13px; background: var(--panel2); border: 1px solid var(--line); display: grid; place-items: center; color: var(--accent); position: relative; }
 .node .disc svg { width: 24px; height: 24px; }
