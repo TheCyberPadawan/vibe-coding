@@ -561,5 +561,5 @@ async function auditPage(doc, page, zones) {
   return [...new Set(r.problems)];
 }
 
-return { cleanPage, auditPage, Unsupported, tokenize };
+return { cleanPage, auditPage, Unsupported, tokenize, fontInfo, ser };
 })();

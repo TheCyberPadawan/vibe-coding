@@ -108,10 +108,56 @@ const FONTS = {
   ManropeLight: { label: 'Manrope léger', css: 'Manrope, sans-serif', files: { r: ['Manrope-Light.ttf', 300], b: ['Manrope-Medium.ttf', 500] } },
   FiraCode: { label: 'Fira Code', css: '"Fira Code", monospace', files: { r: ['FiraCode-Regular.ttf', 400], b: ['FiraCode-Medium.ttf', 500] } },
 };
-const fontOf = a => FONTS[a.font] || FONTS.Helvetica;
+/* Police d'origine d'un texte remplacé (a.psName : nom PostScript sans préfixe de sous-ensemble).
+   Source : la police complète installée dans Windows si on la trouve, sinon celle intégrée au PDF, souvent limitée
+   aux lettres déjà utilisées. Elle n'est employée que si elle contient toutes les lettres du texte ; sinon le texte
+   s'affiche et s'enregistre avec sa police de remplacement (a.font). */
+const DYN = new Map();   // psName -> { ps, family, bytes, fk, from: 'system' | 'pdf', cover }
+const psClean = n => String(n || '').replace(/^[A-Z]{6}\+/, '').replace(/-\d{3,5}$/, '').replace(/[^\w.+ ,-]/g, '').slice(0, 80);
+let dynSeq = 0;
+async function registerDyn(ps, bytes, from) {
+  try {
+    const fk = window.fontkit.create(bytes);
+    if (fk.fonts || !fk.numGlyphs) return null;   // collection ou police vide
+    const family = `AtelierOrig${++dynSeq}`, face = new FontFace(family, bytes);
+    await face.load(); document.fonts.add(face);
+    const e = { ps, family, bytes, fk, from, cover: new Map() };
+    DYN.set(ps, e);
+    return e;
+  } catch (err) { console.warn('Police inutilisable', ps, err); return null; }
+}
+async function resolveFont(ps, pdfData) {
+  if (!ps) return null;
+  const known = DYN.get(ps);
+  if (known?.from === 'system' || known?.triedSystem) return known;
+  try {
+    const r = await window.desktop?.findFont?.(ps);
+    if (r?.bytes) { const e = await registerDyn(ps, new Uint8Array(r.bytes), 'system'); if (e) return e; }
+  } catch (e) { console.warn('Recherche de police', e); }
+  if (known) { known.triedSystem = true; return known; }
+  const e = pdfData?.length ? await registerDyn(ps, pdfData, 'pdf') : null;
+  if (e) e.triedSystem = true;
+  return e;
+}
+function dynOf(a) {
+  const e = a?.psName && DYN.get(a.psName); if (!e) return null;
+  const t = a.text || ''; let ok = e.cover.get(t);
+  if (ok === undefined) {
+    ok = [...t.replace(/\s/g, '')].every(ch => e.fk.hasGlyphForCodePoint(ch.codePointAt(0)));
+    if (e.cover.size > 500) e.cover.clear();
+    e.cover.set(t, ok);
+  }
+  return ok ? e : null;
+}
+const fontOf = a => {
+  const base = FONTS[a.font] || FONTS.Helvetica, d = dynOf(a);
+  return d ? { label: d.ps, css: `"${d.family}", ${base.css}`, dyn: d } : base;
+};
 // Variante disponible la plus proche du style demandé
 function faceOf(a) {
-  const f = fontOf(a), set = f.std || f.files;
+  const f = fontOf(a);
+  if (f.dyn) return { dyn: f.dyn, weight: 400, italic: false };   // la police d'origine porte déjà son style
+  const set = f.std || f.files;
   const k = [(a.bold ? 'b' : '') + (a.italic ? 'i' : ''), a.bold ? 'b' : '', a.italic ? 'i' : '', 'r'].find(x => x && set[x]) || 'r';
   return f.std ? { std: set[k], weight: k.includes('b') ? 700 : 400, italic: k.includes('i') } : { file: set[k][0], weight: set[k][1], italic: k.includes('i') };
 }
@@ -311,7 +357,8 @@ async function imagesToPdfBytes(files) {
 }
 
 function resetDoc() {
-  S.sources = []; S.pages = []; S.undo = []; S.redo = []; S.form = {}; S.sel = null; S.dirty = false; S.cur = 0; propsKey = '';
+  S.sources = []; S.pages = []; S.undo = []; S.redo = []; S.form = {}; S.sel = null; S.vsel = null; S.dirty = false; S.cur = 0; propsKey = '';
+  derived.forEach(d => d.pdf?.loadingTask?.destroy()); derived.clear();
   S.find = { q: '', hits: [], cur: -1 }; S.decor = {}; S.meta = {}; S.protect = null; S.clean = null; S.diff = null; S.metaEdited = false;
 }
 
@@ -338,6 +385,9 @@ async function addFiles(fileList, replace, dir, at) {
         pg.annots = (src.layers?.get(i) || []).map(a => a.type === 'text' && !FONTS[a.font] ? { ...a, font: 'Helvetica' } : a);
         own.push(pg); added.push(pg);
       }
+      // Textes remplacés : leur police d'origine est recherchée dans Windows (sinon police de remplacement)
+      const names = [...new Set(own.flatMap(pg => pg.annots).filter(a => a.psName).map(a => a.psName))];
+      if (names.length) Promise.all(names.map(n => resolveFont(n))).then(() => redrawAll());
       // Liens internes des textes : de la position de page enregistrée à la page ouverte
       for (const pg of own) for (const a of pg.annots) if (a.link?.kind === 'page') {
         const t = own[a.link.index];
@@ -401,8 +451,31 @@ async function rebuild() {
       if (S.tool !== 'select' || e.button !== 0 || e.target.closest('.annot, [data-handle], .forms > *, textarea')) return;
       commitEditor();
       const extend = e.shiftKey || e.ctrlKey || e.metaKey, keep = extend && S.sel?.pid === p.id ? selIds() : [];
+      // Texte ou bloc de couleur du PDF sous la souris : Maj/Ctrl l'ajoute ou le retire de la sélection ;
+      // sinon il est sélectionné (ou le groupe dont il fait partie) et on peut le faire glisser
+      const sh = vHit(view, toPdf(e, view));
+      if (sh && extend) {   // Maj/Ctrl : un clic ajoute ou retire l'élément ; un glisser déplace la sélection (Maj : sur un axe)
+        const k = vKey(sh), had = S.vsel?.pid === p.id && S.vsel.ords.includes(k);
+        if (!had) toggleVsel(view, sh);
+        return groupMove(e, view, el, had ? () => toggleVsel(view, sh) : null);
+      }
+      if (sh) {
+        const inGroup = S.vsel?.pid === p.id && S.vsel.ords.includes(vKey(sh)) && (S.vsel.ords.length > 1 || S.sel);
+        if (!inGroup) setVsel(view, sh);
+        return groupMove(e, view, el, inGroup ? () => setVsel(view, sh) : null);
+      }
+      const keepV = extend && S.vsel?.pid === p.id ? S.vsel.ords : [];
       if (!extend) setSel(null);
-      marquee(e, view, keep);
+      marquee(e, view, keep, keepV);
+    });
+    el.addEventListener('pointermove', e => {   // curseur « déplacer » au-dessus d'un bloc de couleur
+      if (S.tool !== 'select' || e.buttons) return;
+      el.style.cursor = !e.target.closest('.annot, .forms > *, textarea') && vHit(view, toPdf(e, view)) ? 'move' : '';
+    });
+    el.addEventListener('dblclick', async e => {   // double-clic sur un texte du PDF : le modifier directement
+      if (S.tool !== 'select' || e.target.closest('.annot, [data-handle], .forms > *, textarea')) return;
+      const P = toPdf(e, view);
+      if (itemAt(await ensureText(view), P)) { setSel(null); replaceTextAt(view, P, true); }
     });
     svg.addEventListener('pointerdown', e => onDown(e, view));
     svg.addEventListener('mousedown', e => e.preventDefault());   // garde le focus dans l'éditeur de texte
@@ -427,17 +500,23 @@ async function rebuild() {
   renderThumbs(); updateUI(); updateProps(true); trackPage(); renderComments();
   if (!$('#outline').hidden) renderOutline();
 }
-async function renderView(v) {
-  if (v.rendered) return; v.rendered = true;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2), c = v.canvas;
+// again : la page a changé (bloc de couleur modifié) — dessin dans un nouveau canevas, échangé une fois prêt
+async function renderView(v, again) {
+  if (again ? !v.rendered : v.rendered) return; v.rendered = true;
+  if (!v.shapes) shapesOf(v.p).then(s => { v.shapes = s; });
+  const dpr = Math.min(window.devicePixelRatio || 1, 2), c = again ? document.createElement('canvas') : v.canvas;
   c.width = Math.floor(v.vp.width * dpr); c.height = Math.floor(v.vp.height * dpr);
   c.style.width = v.vp.width + 'px'; c.style.height = v.vp.height + 'px';
   try {
-    v.task = v.pg.render({ canvasContext: c.getContext('2d'), viewport: v.vp, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+    let pg = v.pg; try { pg = await renderPage(v.p); } catch (e) { console.warn('Page modifiée', e); }
+    if (!v.rendered) return;
+    const task = pg.render({ canvasContext: c.getContext('2d'), viewport: v.vp, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
       annotationMode: pdfjsLib.AnnotationMode.ENABLE_FORMS });
-    await v.task.promise;
+    if (!again) v.task = task;
+    await task.promise;
   } catch (e) { if (e?.name !== 'RenderingCancelledException') console.error(e); }
-  v.task = null;
+  if (!again) v.task = null;
+  if (again) { if (v.rendered) { v.canvas.replaceWith(c); v.canvas = c; } v.vghost = null; drawAnnots(v); return; }
   if (v.rendered) renderForms(v);
 }
 function releaseView(v) {
@@ -452,11 +531,21 @@ async function renderForms(v) {
   v.forms.replaceChildren();
   const s = v.vp.scale;
   for (const an of anns) {
-    if (an.subtype !== 'Widget' || !an.fieldName || an.hidden) continue;
-    const key = `${v.p.src}:${an.fieldName}`;
     const [x1, y1, x2, y2] = an.rect;
     const a = v.vp.convertToViewportPoint(x1, y1), b = v.vp.convertToViewportPoint(x2, y2);
     const L = Math.min(a[0], b[0]), T = Math.min(a[1], b[1]), W = Math.abs(a[0] - b[0]), H = Math.abs(a[1] - b[1]);
+    // Liens du PDF : zone cliquable (outil Sélection), placée sous les champs
+    if (an.subtype === 'Link' && (an.url || an.unsafeUrl || an.dest != null || an.action)) {
+      const el = document.createElement('a'); el.className = 'pdflink'; el.href = '#';
+      Object.assign(el.style, { left: L + 'px', top: T + 'px', width: W + 'px', height: H + 'px' });
+      el.title = an.url || an.unsafeUrl || 'Aller à la page liée';
+      el.setAttribute('aria-label', el.title);
+      el.addEventListener('click', async e => { e.preventDefault(); followLink(await pdfLinkTarget(v, an)); });
+      v.forms.prepend(el);
+      continue;
+    }
+    if (an.subtype !== 'Widget' || !an.fieldName || an.hidden) continue;
+    const key = `${v.p.src}:${an.fieldName}`;
     let el, get;
     if (an.fieldType === 'Tx') {
       el = document.createElement(an.multiLine ? 'textarea' : 'input');
@@ -638,6 +727,27 @@ function drawAnnots(v) {
     }
     v.g.append(sg);
   }
+  // Bloc de couleur du PDF : aperçu pendant le déplacement, cadre et poignée de la sélection
+  const ghost = new Map((v.vghost || []).map(g => [vKey(g.sh), g.m]));
+  for (const { sh, m } of v.vghost || []) {
+    const ed = edOf(v.p, sh);
+    if (sh.kind === 'text') {   // aperçu : l'image du texte prise sur la page, à sa nouvelle place
+      const b = vBox(v.p, sh, m), img = v.vcrops?.get(vKey(sh));
+      if (img) v.g.append(svgEl('image', { href: img, x: b.x0, y: -b.y1, width: b.x1 - b.x0, height: b.y1 - b.y0, transform: 'scale(1 -1)', preserveAspectRatio: 'none', 'pointer-events': 'none' }));
+      v.g.append(svgEl('rect', { class: 'vghost', x: b.x0, y: b.y0, width: b.x1 - b.x0, height: b.y1 - b.y0, fill: img ? 'none' : 'rgba(31,115,216,.15)', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' }));
+      continue;
+    }
+    v.g.append(svgEl('path', { class: 'vghost', d: AtelierVector.svgPath(sh.segs, m), 'fill-rule': sh.evenodd ? 'evenodd' : 'nonzero',
+      fill: ed?.fill || sh.fill || '#9aa5a1', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' }));
+  }
+  const vsel = S.vsel?.pid === v.p.id ? vList(v).filter(s => S.vsel.ords.includes(vKey(s))) : [];
+  for (const sh of vsel) {
+    const b = vBox(v.p, sh, ghost.get(vKey(sh))), sg = svgEl('g', { class: 'selbox' });
+    sg.append(svgEl('rect', { x: b.x0 - 2, y: b.y0 - 2, width: b.x1 - b.x0 + 4, height: b.y1 - b.y0 + 4, 'stroke-width': 1.5, 'stroke-dasharray': '5 4', 'vector-effect': 'non-scaling-stroke' }));
+    if (vsel.length === 1 && sh.kind !== 'text' && !S.sel)
+      sg.append(svgEl('circle', { class: 'handle', 'data-handle': 'v', cx: b.x1, cy: b.y0, r: 6 / v.vp.scale, 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke' }));
+    v.g.append(sg);
+  }
   // Repères d'alignement pendant un déplacement, cadre de sélection tiré à la souris
   for (const l of v.guides || []) {
     if (l.gap) { const [x0, y0, x1, y1] = l.gap; v.g.append(svgEl('rect', { class: 'gapmark', x: x0, y: y0, width: x1 - x0, height: y1 - y0, 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' })); }
@@ -651,6 +761,7 @@ const redrawAll = () => V.forEach(drawAnnots);
 /* ---------- Sélection & outils ---------- */
 function selAnnot() { if (!S.sel) return null; const p = S.pages.find(x => x.id === S.sel.pid); return p?.annots.find(a => a.id === S.sel.aid) || null; }
 function setSel(pid, aid) {
+  if (S.vsel) { const q = S.vsel.pid; S.vsel = null; if (q !== pid) redraw(q); }   // un seul genre de sélection à la fois
   const prev = S.sel?.pid; S.sel = pid ? { pid, aid } : null;
   if (prev) redraw(prev); if (pid && pid !== prev) redraw(pid);
   updateProps();
@@ -663,6 +774,7 @@ function selAnnots() {
   return p ? selIds().map(id => p.annots.find(a => a.id === id)).filter(Boolean) : [];
 }
 function selectMany(pid, ids, main = ids[ids.length - 1]) {
+  if (S.vsel) { const q = S.vsel.pid; S.vsel = null; if (q !== pid) redraw(q); }
   const prev = S.sel?.pid;
   S.sel = ids.length ? { pid, aid: main, more: ids.filter(x => x !== main) } : null;
   if (prev && prev !== pid) redraw(prev);
@@ -697,8 +809,16 @@ const structSig = pages => pages.map(p => `${p.id}:${p.src}:${p.idx}:${p.rot}`).
 function snapshot() { S.undo.push(serialize()); if (S.undo.length > 100) S.undo.shift(); S.redo = []; S.dirty = true; updateUI(); }
 function pushSnap(s) { S.undo.push(s); S.redo = []; S.dirty = true; updateUI(); }
 function restore(json) {
-  const old = structSig(S.pages), o = JSON.parse(json); S.pages = o.p; S.decor = o.d || {}; S.sel = null;
-  if (structSig(S.pages) === old) { S.pages.forEach(p => { const v = V.get(p.id); if (v) { v.p = p; drawAnnots(v); } }); updateProps(); updateUI(); renderComments(); }
+  const old = structSig(S.pages), o = JSON.parse(json), oldV = new Map(S.pages.map(p => [p.id, JSON.stringify(p.vedits || {})]));
+  S.pages = o.p; S.decor = o.d || {}; S.sel = null; S.vsel = null;
+  if (structSig(S.pages) === old) {
+    S.pages.forEach(p => {
+      const v = V.get(p.id); if (!v) return;
+      v.p = p; drawAnnots(v);
+      if (JSON.stringify(p.vedits || {}) !== oldV.get(p.id)) refreshView(v);   // bloc de couleur rétabli ou remodifié
+    });
+    updateProps(); updateUI(); renderComments();
+  }
   else rebuild();
 }
 function undo() { commitEditor(); if (!S.undo.length) return; S.redo.push(serialize()); restore(S.undo.pop()); S.dirty = true; }
@@ -720,9 +840,21 @@ function onDown(e, v) {
   const P = toPdf(e, v), p = v.p, R = v.rotation, t = S.tool, hit = hitAnnot(e, v);
   if (t === 'select') {
     const hd = e.target.closest('[data-handle]');
+    if (hd?.dataset.handle === 'v') { const vs = vSel(); if (vs) return vDrag(e, v, vs.sh, v.svg); }
     if (hd) { const a = selAnnot(); if (a) return drag(e, v, a, 'resize', null, hd.dataset.handle); }
+    if (hit && S.vsel?.pid === p.id && S.sel?.pid === p.id && selIds().includes(hit.id) && !(e.shiftKey || e.ctrlKey || e.metaKey))
+      return groupMove(e, v, v.svg, () => setSel(p.id, hit.id));   // groupe mêlant ajouts et éléments du PDF
     if (hit) {
-      if (e.shiftKey || e.ctrlKey || e.metaKey) return toggleSel(p.id, hit.id);
+      if ((e.shiftKey || e.ctrlKey || e.metaKey) && S.vsel?.pid === p.id) {   // ajout ajouté à un groupe d'éléments du PDF
+        const ids = selIds(), on = ids.includes(hit.id), next = on ? ids.filter(x => x !== hit.id) : [...ids, hit.id];
+        S.sel = next.length ? { pid: p.id, aid: next[next.length - 1], more: next.slice(0, -1) } : null;
+        drawAnnots(v); updateProps(); return;
+      }
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {   // un clic ajoute ou retire ; un glisser déplace (Maj : sur un axe)
+        if (selIds().includes(hit.id)) return drag(e, v, hit, 'move', () => toggleSel(p.id, hit.id));
+        toggleSel(p.id, hit.id);
+        return drag(e, v, hit, 'move');
+      }
       const inGroup = S.sel?.pid === p.id && selIds().length > 1 && selIds().includes(hit.id);
       if (inGroup) selectMany(p.id, selIds(), hit.id); else setSel(p.id, hit.id);
       // Dans un groupe, un simple clic sans déplacer ne garde que l'élément cliqué
@@ -796,6 +928,7 @@ function drag(e, v, a, mode, onClick, handle) {
   const box0 = mode === 'move' ? unionBox(origs.map(annotBox)) : null, base0 = group.length === 1 ? baselineOf(a) : null;
   capture(v, e, ev => {
     const P = toPdf(ev, v); let dx = P[0] - start[0], dy = P[1] - start[1];
+    if (mode === 'move') [dx, dy] = axisLock(ev, dx, dy);   // Maj : horizontal ou vertical seulement
     if (!moved) {
       if (Math.hypot(dx, dy) * v.vp.scale < 2) return;
       pushSnap(snap); moved = true;
@@ -807,6 +940,7 @@ function drag(e, v, a, mode, onClick, handle) {
     }
     if (mode === 'move') {
       const s = ev.ctrlKey || ev.metaKey ? { dx, dy, guides: [] } : snapMove(box0, base0, dx, dy, targets, 5 / v.vp.scale);
+      if (ev.shiftKey) { if (dy === 0) s.dy = 0; else s.dx = 0; }   // l'aimant ne fait pas quitter l'axe
       group.forEach((g, k) => { placeLike(g, origs[k]); shiftAnnot(g, s.dx, s.dy); });
       v.guides = s.guides;
     } else if (a.type === 'line') {
@@ -827,9 +961,218 @@ function placeLike(g, o) {
   else Object.assign(g, { x: o.x, y: o.y });
 }
 
+/* ---------- Blocs de couleur du PDF ---------- */
+// Les formes pleines du contenu d'origine se sélectionnent avec l'outil Sélection. Leurs modifications (p.vedits)
+// sont appliquées à leur place dans le contenu de la page (js/vector.js), à l'écran comme à l'enregistrement.
+const ID6 = [1, 0, 0, 1, 0, 0];
+const libOf = src => src.lib ??= PDFLib.PDFDocument.load(src.bytes, { ignoreEncryption: true });
+function shapesOf(p) {
+  const src = S.sources[p.src]; src.shapes ??= new Map();
+  if (!src.shapes.has(p.idx)) src.shapes.set(p.idx, libOf(src).then(d => AtelierVector.scan(d, d.getPage(p.idx))).catch(e => { console.warn('Formes illisibles', e); return []; }));
+  return src.shapes.get(p.idx);
+}
+const hasVedits = p => !!p.vedits && Object.keys(p.vedits).length > 0;
+const derived = new Map();   // id de page -> { key, pg, pdf } : la page redessinée avec ses blocs modifiés
+async function renderPage(p) {
+  if (!hasVedits(p)) return getPdfPage(p);
+  const key = JSON.stringify(p.vedits), d = derived.get(p.id);
+  if (d?.key === key) return d.pg;
+  const doc = await libOf(S.sources[p.src]), out = await PDFLib.PDFDocument.create();
+  const [cp] = await out.copyPages(doc, [p.idx]); out.addPage(cp);
+  AtelierVector.apply(out, cp, p.vedits);
+  const pdf = await openPdfjs(await out.save()), pg = await pdf.getPage(1);
+  derived.set(p.id, { key, pg, pdf });
+  if (d) setTimeout(() => d.pdf.loadingTask.destroy(), 3000);
+  return pg;
+}
+// Un élément du PDF est désigné par une clé : son numéro d'ordre, ou « numéro:id » pour une copie (Alt + glisser).
+// Les copies vivent dans p.vedits[ord].copies = [{ id, m, fill }] et se dessinent juste après leur original.
+const vKey = sh => sh.copyId ? `${sh.ord}:${sh.copyId}` : String(sh.ord);
+function edOf(p, sh) {
+  const e = p.vedits?.[sh.ord] || {};
+  return sh.copyId ? (e.copies || []).find(c => c.id === sh.copyId) || {} : e;
+}
+const mOf = (p, sh) => edOf(p, sh).m || ID6;
+// Formes et textes d'origine encore présents, chacun suivi de ses copies (ordre du dessin)
+function vList(v) {
+  const out = [];
+  for (const sh of v.shapes || []) {
+    const e = v.p.vedits?.[sh.ord];
+    if (!e?.del) out.push(sh);
+    for (const c of e?.copies || []) out.push({ ...sh, copyId: c.id });
+  }
+  return out;
+}
+// Nouvel état des modifications avec celle d'un élément remplacée (patch) ou retirée (null)
+function withEdit(vedits, sh, patch) {
+  const next = { ...(vedits || {}) }, base = { ...(next[sh.ord] || {}) };
+  if (sh.copyId) {
+    base.copies = (base.copies || []).flatMap(c => c.id !== sh.copyId ? [c] : patch ? [{ ...c, ...patch }] : []);
+    if (!base.copies.length) delete base.copies;
+  } else if (patch) Object.assign(base, patch);
+  else { delete base.m; delete base.fill; }
+  if (!base.m && !base.fill && !base.del && !base.copies) delete next[sh.ord]; else next[sh.ord] = base;
+  return next;
+}
+const round4 = m => m.map(x => +x.toFixed(4));
+function vBox(p, sh, m = mOf(p, sh)) {
+  const b = sh.box;
+  return bbox([[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]].map(q => AtelierVector.ap(m, q[0], q[1])));
+}
+// Élément visible le plus haut sous le point (les fonds qui couvrent presque toute la page sont ignorés)
+function vHit(v, P) {
+  const list = vList(v); if (!list.length) return null;
+  const [x0, y0, x1, y1] = v.pg.view, page = (x1 - x0) * (y1 - y0);
+  for (let i = list.length - 1; i >= 0; i--) {
+    const sh = list[i], m = mOf(v.p, sh), b = vBox(v.p, sh, m);
+    if ((b.x1 - b.x0) * (b.y1 - b.y0) > page * 0.85 || P[0] < b.x0 || P[0] > b.x1 || P[1] < b.y0 || P[1] > b.y1) continue;
+    const Q = m !== ID6 ? AtelierVector.ap(AtelierVector.inv(m) || ID6, P[0], P[1]) : P;
+    if (AtelierVector.inside(sh.polys, Q, sh.evenodd)) return sh;
+  }
+  return null;
+}
+// Éléments du PDF sélectionnés (S.vsel = { pid, ords: [clés] }), éventuellement avec des ajouts de la même page (S.sel)
+function vItems() {
+  if (!S.vsel) return null;
+  const p = S.pages.find(x => x.id === S.vsel.pid), v = p && V.get(p.id);
+  const list = v ? vList(v).filter(s => S.vsel.ords.includes(vKey(s))) : [];
+  return list.length ? { p, v, list } : null;
+}
+// Un seul bloc de couleur, sans ajout : on peut changer sa couleur et sa taille
+function vSel() {
+  const it = vItems();
+  return it && it.list.length === 1 && it.list[0].kind !== 'text' && !S.sel ? { p: it.p, v: it.v, sh: it.list[0] } : null;
+}
+function setVsel(v, sh) {
+  const prev = S.sel?.pid, prevV = S.vsel?.pid;
+  S.sel = null; S.vsel = sh ? { pid: v.p.id, ords: [vKey(sh)] } : null;
+  if (prev && prev !== v.p.id) redraw(prev);
+  if (prevV && prevV !== v.p.id) redraw(prevV);
+  drawAnnots(v); updateProps();
+}
+function toggleVsel(v, sh) {
+  if (S.vsel && S.vsel.pid !== v.p.id) return setVsel(v, sh);
+  if (S.sel && S.sel.pid !== v.p.id) { const q = S.sel.pid; S.sel = null; redraw(q); }
+  const k = vKey(sh), ords = S.vsel?.ords || [];
+  S.vsel = { pid: v.p.id, ords: ords.includes(k) ? ords.filter(o => o !== k) : [...ords, k] };
+  if (!S.vsel.ords.length) S.vsel = null;
+  drawAnnots(v); updateProps();
+}
+// Image de chaque texte sélectionné, découpée dans la page affichée (aperçu pendant le déplacement)
+function textCrops(v, items) {
+  const out = new Map();
+  if (v.rotation % 360 || !v.canvas.width) return out;
+  const k = v.canvas.width / v.vp.width;
+  for (const sh of items) {
+    if (sh.kind !== 'text') continue;
+    const b = vBox(v.p, sh), [x0, y0] = v.vp.convertToViewportPoint(b.x0, b.y1), [x1, y1] = v.vp.convertToViewportPoint(b.x1, b.y0);
+    const w = Math.max(1, Math.round((x1 - x0) * k)), h = Math.max(1, Math.round((y1 - y0) * k));
+    if (w * h > 4e6) continue;
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    c.getContext('2d').drawImage(v.canvas, Math.round(x0 * k), Math.round(y0 * k), w, h, 0, 0, w, h);
+    out.set(vKey(sh), c.toDataURL('image/png'));
+  }
+  return out;
+}
+// Maj pendant un déplacement : seulement à l'horizontale ou à la verticale (l'axe du plus grand mouvement)
+const axisLock = (ev, dx, dy) => !ev.shiftKey ? [dx, dy] : Math.abs(dx) >= Math.abs(dy) ? [dx, 0] : [0, dy];
+// Déplace ensemble les éléments du PDF sélectionnés et les ajouts sélectionnés de la page.
+// Alt au début du geste : ce sont des copies qui se déplacent, les originaux restent en place.
+function groupMove(e, v, el, onClick) {
+  const p = v.p, dup = e.altKey;
+  let annots = S.sel?.pid === p.id ? selAnnots() : [];
+  const orig = annots.map(clone);
+  const items = S.vsel?.pid === p.id ? vList(v).filter(s => S.vsel.ords.includes(vKey(s))) : [];
+  const m0 = new Map(items.map(sh => [vKey(sh), mOf(p, sh)]));
+  const start = toPdf(e, v), snap = serialize();
+  let moved = false, dx = 0, dy = 0;
+  const at = sh => AtelierVector.mul(m0.get(vKey(sh)), [1, 0, 0, 1, dx, dy]);
+  try { el.setPointerCapture(e.pointerId); } catch {}
+  const move = ev => {
+    const Q = toPdf(ev, v);
+    [dx, dy] = axisLock(ev, Q[0] - start[0], Q[1] - start[1]);
+    if (!moved && Math.hypot(Q[0] - start[0], Q[1] - start[1]) * v.vp.scale < 3) return;
+    if (!moved) {
+      pushSnap(snap); moved = true; v.vcrops = textCrops(v, items);
+      if (dup) annots = orig.map(o => { const c = clone(o); c.id = uid(); if (c.type === 'field') c.name = fieldName(c.name); p.annots.push(c); return c; });
+    }
+    annots.forEach((a, i) => { placeLike(a, orig[i]); shiftAnnot(a, dx, dy); });
+    v.vghost = items.length ? items.map(sh => ({ sh, m: at(sh) })) : null;
+    drawAnnots(v);
+  };
+  const end = () => {
+    el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', end); el.removeEventListener('pointercancel', end);
+    if (!moved) return onClick?.();
+    let next = p.vedits, keys = [];
+    for (const sh of items) {
+      if (dup) {   // la copie reprend la couleur de l'élément copié
+        const id = uid(), base = { ...((next || {})[sh.ord] || {}) }, fill = edOf(p, sh).fill;
+        base.copies = [...(base.copies || []), { id, m: round4(at(sh)), ...(fill ? { fill } : {}) }];
+        next = { ...(next || {}), [sh.ord]: base };
+        keys.push(`${sh.ord}:${id}`);
+      } else { next = withEdit(next, sh, { m: round4(at(sh)) }); keys.push(vKey(sh)); }
+    }
+    if (dup && annots.length) S.sel = { pid: p.id, aid: annots[annots.length - 1].id, more: annots.slice(0, -1).map(a => a.id) };
+    if (items.length) { p.vedits = next; S.vsel = { pid: p.id, ords: keys }; refreshView(v); }
+    else drawAnnots(v);
+    propsKey = ''; updateProps();
+  };
+  el.addEventListener('pointermove', move); el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+}
+function refreshView(v) {
+  v.text = null; v.textLoading = false;   // les textes ont pu bouger
+  renderView(v, true);
+  const t = document.querySelector(`.thumb[data-id="${v.p.id}"]`); if (t) drawThumb(t);
+}
+// Poignée d'un bloc : redimensionne, coin haut gauche fixe (Maj : garder les proportions) ; el capture la souris
+function vDrag(e, v, sh, el) {
+  const p = v.p, m0 = mOf(p, sh), b0 = vBox(p, sh), start = toPdf(e, v);
+  const bw = b0.x1 - b0.x0, bh = b0.y1 - b0.y0;
+  let moved = false, m = m0;
+  try { el.setPointerCapture(e.pointerId); } catch {}
+  const move = ev => {
+    const Q = toPdf(ev, v);
+    if (!moved && Math.hypot(Q[0] - start[0], Q[1] - start[1]) * v.vp.scale < 3) return;
+    moved = true;
+    let w = Math.max(2, Q[0] - b0.x0), h = Math.max(2, b0.y1 - Q[1]);
+    if (ev.shiftKey) { const k = Math.max(w / bw, h / bh); w = bw * k; h = bh * k; }
+    const sx = w / bw, sy = h / bh;
+    m = AtelierVector.mul(m0, [sx, 0, 0, sy, b0.x0 - b0.x0 * sx, b0.y1 - b0.y1 * sy]);
+    v.vghost = [{ sh, m }]; drawAnnots(v);
+  };
+  const end = () => {
+    el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', end); el.removeEventListener('pointercancel', end);
+    if (!moved) return;
+    snapshot();
+    p.vedits = withEdit(p.vedits, sh, { m: round4(m) });
+    propsKey = ''; updateProps(); refreshView(v);
+  };
+  el.addEventListener('pointermove', move); el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+}
+// Modifie le bloc sélectionné (changes : { fill }) ou le rétablit (null)
+function vChange(changes) {
+  const vs = vSel(); if (!vs) return;
+  const { p, v, sh } = vs;
+  snapshot();
+  p.vedits = withEdit(p.vedits, sh, changes);
+  propsKey = ''; updateProps(); refreshView(v);
+}
+// Supprime les éléments du PDF sélectionnés (et les ajouts sélectionnés avec eux). Un original supprimé garde ses copies.
+function vDelete() {
+  const it = vItems(); if (!it) return;
+  const { p, v, list } = it, annots = S.sel?.pid === p.id ? selAnnots() : [];
+  snapshot();
+  let next = p.vedits;
+  for (const sh of list) next = sh.copyId ? withEdit(next, sh, null) : withEdit(next, sh, { del: true });
+  p.vedits = next;
+  if (annots.length) p.annots = p.annots.filter(a => !annots.includes(a));
+  S.vsel = null; S.sel = null; drawAnnots(v); updateProps(); refreshView(v); renderComments();
+}
+
 // Éléments qu'on peut sélectionner à plusieurs, aligner ou aimanter (pas les zones qui effacent un texte remplacé)
 const groupable = a => !(a.type === 'rect' && a.erase);
-function marquee(e, v, keep) {
+// Cadre tiré dans le vide : sélectionne tout ce qui est entièrement dedans (ajouts, textes et blocs du PDF)
+function marquee(e, v, keep, keepV = []) {
   const P = toPdf(e, v); let m = null;
   try { v.el.setPointerCapture(e.pointerId); } catch {}
   const move = ev => {
@@ -842,8 +1185,16 @@ function marquee(e, v, keep) {
     v.el.removeEventListener('pointermove', move); v.el.removeEventListener('pointerup', end); v.el.removeEventListener('pointercancel', end);
     if (!m) return;
     v.marquee = null;
-    const ids = v.p.annots.filter(a => groupable(a) && hits(annotBox(a), m)).map(a => a.id), all = [...new Set([...keep, ...ids])];
-    if (all.length) selectMany(v.p.id, all); else drawAnnots(v);
+    const ids = v.p.annots.filter(a => groupable(a) && within(annotBox(a), m)).map(a => a.id), all = [...new Set([...keep, ...ids])];
+    const [px0, py0, px1, py1] = v.pg.view, page = (px1 - px0) * (py1 - py0);
+    const ords = vList(v).filter(sh => {
+      const b = vBox(v.p, sh);
+      return within(b, m) && (b.x1 - b.x0) * (b.y1 - b.y0) <= page * 0.85;   // pas les fonds de page
+    }).map(vKey);
+    const allV = [...new Set([...keepV, ...ords])];
+    if (all.length) selectMany(v.p.id, all); else { S.sel = null; }
+    S.vsel = allV.length ? { pid: v.p.id, ords: allV } : null;
+    drawAnnots(v); updateProps();
   };
   v.el.addEventListener('pointermove', move); v.el.addEventListener('pointerup', end); v.el.addEventListener('pointercancel', end);
 }
@@ -1127,6 +1478,42 @@ async function editLink(v, a, snap) {
   a.target = t;
   S.sel = { pid: v.p.id, aid: a.id }; propsKey = ''; drawAnnots(v); updateProps();
 }
+// Suivre un lien : page du document, ou adresse externe après confirmation (comme Acrobat Reader)
+async function followLink(target) {
+  if (!target) return;
+  if (target.kind === 'page') {
+    const i = typeof target.index === 'number' ? target.index : S.pages.findIndex(p => p.id === target.page);
+    return i < 0 ? toast('Cette page ne fait plus partie du document.') : scrollToPage(i);
+  }
+  const url = safeUrl(target.url);
+  if (!url) return toast("Ce lien n'est pas une adresse web, e-mail ou téléphone : il n'est pas ouvert.", 5000);
+  const ok = await ask({ title: 'Ouvrir ce lien ?', ok: 'Ouvrir',
+    html: `<p style="margin:0">Le document veut ouvrir l'adresse suivante${/^https?:/i.test(url) ? ' dans votre navigateur' : ''} :</p>
+      <p style="margin:0;word-break:break-all"><code>${escHtml(url)}</code></p>
+      <p class="small" style="margin:0">N'ouvrez que les liens des documents en qui vous avez confiance.</p>` });
+  if (!ok) return;
+  try { window.desktop?.openUrl ? await window.desktop.openUrl(url) : window.open(url, '_blank', 'noopener'); }
+  catch (e) { toast(`Le lien n'a pas pu être ouvert : ${e.message}`, 6000); }
+}
+// Destination d'un lien du PDF d'origine (pdf.js), ramenée à une page du document affiché
+async function pdfLinkTarget(v, an) {
+  if (an.url || an.unsafeUrl) return { kind: 'url', url: an.url || an.unsafeUrl };
+  const pdf = S.sources[v.p.src]?.pdf; let idx = null;
+  try {
+    if (an.dest != null) {
+      const dest = typeof an.dest === 'string' ? await pdf.getDestination(an.dest) : an.dest;
+      const ref = Array.isArray(dest) ? dest[0] : null;
+      idx = typeof ref === 'number' ? ref : ref ? await pdf.getPageIndex(ref) : null;
+    } else if (an.action) {
+      const cur = S.pages.indexOf(v.p), n = S.pages.length;
+      const to = { NextPage: cur + 1, PrevPage: cur - 1, FirstPage: 0, LastPage: n - 1 }[an.action];
+      return to >= 0 && to < n ? { kind: 'page', index: to } : null;
+    }
+  } catch (e) { console.warn('Lien', e); }
+  if (idx == null) return null;
+  const k = S.pages.findIndex(p => p.src === v.p.src && p.idx === idx);
+  return { kind: 'page', index: k };
+}
 // Lien posé sur un texte : il suit le texte quand on le déplace
 async function editTextLink(v, a) {
   const t = await askLink(a.link || { kind: 'url', url: '' }); if (!t) return;
@@ -1228,12 +1615,15 @@ function makeStamp({ text, color, date }) {
 /* ---------- Remplacer un texte existant ---------- */
 async function ensureText(v) {
   if (v.text) return v.text;
-  const tc = await v.pg.getTextContent();
+  // Page dont des éléments ont été déplacés : on lit le texte de sa version modifiée (positions à jour)
+  let pg = v.pg; try { pg = await renderPage(v.p); } catch {}
+  v.textPg = pg;
+  const tc = await pg.getTextContent();
   v.text = tc.items.filter(it => it.str && it.str.trim()).map(it => {
     const [a, b, c, d, e, f] = it.transform;
     const fam = tc.styles[it.fontName]?.fontFamily || 'sans-serif';
-    let bold = false; try { if (v.pg.commonObjs.has(it.fontName)) bold = /bold|black|heavy|semibold/i.test(v.pg.commonObjs.get(it.fontName)?.name || ''); } catch {}
-    return { str: it.str, x: e, y: f, r: Math.atan2(b, a) * 180 / Math.PI, fs: Math.hypot(c, d) || it.height || 10, w: it.width, fam, bold };
+    let bold = false; try { if (pg.commonObjs.has(it.fontName)) bold = /bold|black|heavy|semibold/i.test(pg.commonObjs.get(it.fontName)?.name || ''); } catch {}
+    return { str: it.str, x: e, y: f, r: Math.atan2(b, a) * 180 / Math.PI, fs: Math.hypot(c, d) || it.height || 10, w: it.width, fam, bold, fontName: it.fontName };
   });
   for (const o of v.p.ocr || []) v.text.push({ str: o.str, x: o.x, y: o.y, r: o.r, fs: o.fs, w: o.w, fam: 'sans-serif', bold: false, ocr: true });
   return v.text;
@@ -1242,40 +1632,61 @@ function itemAt(items, P) {
   return items.find(it => { const q = rot(sub(P, [it.x, it.y]), -it.r); return q[0] >= -1 && q[0] <= it.w + 1 && q[1] >= -it.fs * 0.28 && q[1] <= it.fs * 0.98; });
 }
 function canvasPx(v, pt) { const [x, y] = v.vp.convertToViewportPoint(pt[0], pt[1]); const k = v.canvas.width / v.vp.width; return [Math.round(x * k), Math.round(y * k)]; }
+// Fond : la couleur qui revient le plus autour du texte (et non la plus claire : un texte blanc sur un bloc bleu
+// a un fond bleu). Encre : le pixel du texte le plus éloigné du fond (le cœur des lettres, sans l'anticrénelage).
 function sampleColors(v, it) {
   let bg = '#ffffff', ink = '#111111';
   try {
     if (!v.canvas.width) return { bg, ink };
     const ctx = v.canvas.getContext('2d', { willReadFrequently: true });
-    const lum = d => 0.299 * d[0] + 0.587 * d[1] + 0.114 * d[2];
-    let best = null, bl = -1;
-    for (const q of [[-3, -it.fs * 0.4], [it.w + 3, -it.fs * 0.4], [-3, it.fs * 1.1], [it.w + 3, it.fs * 1.1], [it.w / 2, it.fs * 1.15], [it.w / 2, -it.fs * 0.45]]) {
+    const dist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+    const around = [];
+    for (const q of [[-3, -it.fs * 0.4], [it.w + 3, -it.fs * 0.4], [-3, it.fs * 1.1], [it.w + 3, it.fs * 1.1], [it.w / 2, it.fs * 1.15], [it.w / 2, -it.fs * 0.45], [-it.fs * 0.3, it.fs * 0.3], [it.w + it.fs * 0.3, it.fs * 0.3]]) {
       const [x, y] = canvasPx(v, add([it.x, it.y], rot(q, it.r)));
       if (x < 0 || y < 0 || x >= v.canvas.width || y >= v.canvas.height) continue;
-      const d = ctx.getImageData(x, y, 1, 1).data; const l = lum(d); if (l > bl) { bl = l; best = d; }
+      around.push([...ctx.getImageData(x, y, 1, 1).data.slice(0, 3)]);
     }
-    if (best) bg = rgb2hex(best[0], best[1], best[2]);
+    let back = [255, 255, 255];
+    if (around.length) {
+      back = around.reduce((best, p) => around.reduce((s, q) => s + dist(p, q), 0) < around.reduce((s, q) => s + dist(best, q), 0) ? p : best);
+      bg = rgb2hex(...back);
+    }
     const c1 = canvasPx(v, add([it.x, it.y], rot([0, it.fs * 0.8], it.r))), c2 = canvasPx(v, add([it.x, it.y], rot([it.w, -it.fs * 0.1], it.r)));
     const x0 = Math.max(0, Math.min(c1[0], c2[0])), y0 = Math.max(0, Math.min(c1[1], c2[1]));
     const w = Math.min(600, Math.abs(c1[0] - c2[0])), h = Math.min(200, Math.abs(c1[1] - c2[1]));
     if (w > 0 && h > 0) {
-      const d = ctx.getImageData(x0, y0, w, h).data; let dl = 999, di = 0;
-      for (let i = 0; i < d.length; i += 4) { const l = lum([d[i], d[i + 1], d[i + 2]]); if (l < dl) { dl = l; di = i; } }
-      if (bl - dl > 40) ink = rgb2hex(d[di], d[di + 1], d[di + 2]);
+      const d = ctx.getImageData(x0, y0, w, h).data; let far = 0, fi = -1;
+      for (let i = 0; i < d.length; i += 4) { const k = dist([d[i], d[i + 1], d[i + 2]], back); if (k > far) { far = k; fi = i; } }
+      if (far > 60) ink = rgb2hex(d[fi], d[fi + 1], d[fi + 2]);
     }
   } catch (e) { console.warn(e); }
   return { bg, ink };
 }
-async function replaceTextAt(v, P) {
+// Police d'un élément de texte du PDF : nom, données, famille de remplacement la plus proche
+async function pdfFontOf(v, it) {
+  const out = { font: /mono/i.test(it.fam) ? 'Courier' : /sans/i.test(it.fam) ? 'Helvetica' : /serif/i.test(it.fam) ? 'Times' : 'Helvetica', bold: it.bold, italic: false, psName: null };
+  try {
+    const pg = v.textPg || v.pg, objs = pg.commonObjs;
+    if (!objs.has(it.fontName)) await pg.getOperatorList();   // polices pas encore chargées (page jamais dessinée)
+    const fo = objs.has(it.fontName) ? objs.get(it.fontName) : null;
+    if (!fo?.name) return out;
+    if (fo.isMonospace) out.font = 'Courier'; else if (fo.isSerifFont) out.font = 'Times';
+    out.bold = /bold|black|heavy|semibold|demi/i.test(fo.name); out.italic = /italic|oblique/i.test(fo.name);
+    const ps = psClean(fo.name);
+    if (ps && await resolveFont(ps, fo.data)) out.psName = ps;
+  } catch (e) { console.warn('Police du texte', e); }
+  return out;
+}
+async function replaceTextAt(v, P, quiet) {
   const it = itemAt(await ensureText(v), P);
-  if (!it) return toast('Aucun texte ici. Cliquez directement sur un mot du PDF.');
+  if (!it) { if (!quiet) toast('Aucun texte ici. Cliquez directement sur un mot du PDF.'); return; }
+  const { bg, ink } = sampleColors(v, it), pf = await pdfFontOf(v, it);
   const snap = serialize(); pushSnap(snap);
-  const { bg, ink } = sampleColors(v, it);
   const pad = it.fs * 0.08, o = add([it.x, it.y], rot([-pad, -it.fs * 0.27], it.r));
   // Zone de caviardage couleur du fond : l'ancien texte est réellement retiré du fichier à l'enregistrement
   const mask = { id: uid(), type: 'rect', kind: 'redact', erase: true, x: r2(o[0]), y: r2(o[1]), w: r2(it.w + pad * 2), h: r2(it.fs * 1.24), r: r2(it.r), color: bg };
-  const font = /mono/i.test(it.fam) ? 'Courier' : /sans/i.test(it.fam) ? 'Helvetica' : /serif/i.test(it.fam) ? 'Times' : 'Helvetica';
-  const txt = { id: uid(), type: 'text', x: r2(it.x), y: r2(it.y), r: r2(it.r), text: it.str, size: Math.round(it.fs * 10) / 10, font, bold: it.bold, color: ink };
+  const txt = { id: uid(), type: 'text', x: r2(it.x), y: r2(it.y), r: r2(it.r), text: it.str, size: Math.round(it.fs * 10) / 10, font: pf.font, bold: pf.bold, italic: pf.italic, color: ink };
+  if (pf.psName) txt.psName = pf.psName;
   v.p.annots.push(mask, txt); S.sel = { pid: v.p.id, aid: txt.id }; updateProps();
   openEditor(v, txt, { pushed: true });
 }
@@ -1380,6 +1791,33 @@ function updateProps(force) {
     el.querySelector('[data-act=cropok]').addEventListener('click', exitCrop);
     return;
   }
+  const vi = vItems();
+  if (vi && !vSel()) {   // plusieurs éléments du PDF, un texte du PDF, ou un groupe mêlé d'ajouts
+    const n = vi.list.length + (S.sel ? selIds().length : 0), oneText = n === 1 && vi.list[0].kind === 'text';
+    const key = `vgroup|${vi.p.id}|${S.vsel.ords.join(',')}|${selIds().join(',')}`;
+    if (key === propsKey && !force) return; propsKey = key;
+    const el = $('#props');
+    el.innerHTML = `<span class="hint"><b>${oneText ? 'Texte du PDF' : `${n} éléments sélectionnés`}</b></span>`
+      + `<button class="btn danger" data-act="vdel" title="Supprimer (Suppr)">${icon('trash')}Supprimer</button>`
+      + `<span class="hint">${oneText ? 'Faites-le glisser pour le déplacer ; double-cliquez pour modifier ses mots.' : 'Faites glisser l\'un d\'eux pour tout déplacer. Maj+clic pour en ajouter ou en retirer.'}</span>`;
+    el.querySelector('[data-act=vdel]').addEventListener('click', vDelete);
+    return;
+  }
+  const vs = vSel();
+  if (vs) {   // bloc de couleur du PDF
+    const ed = edOf(vs.p, vs.sh), fill = ed.fill || vs.sh.fill, key = `vshape|${vs.p.id}:${vKey(vs.sh)}|${!!(ed.m || ed.fill)}`;
+    if (key === propsKey && !force) return; propsKey = key;
+    const el = $('#props');
+    el.innerHTML = `<span class="hint"><b>Bloc du PDF</b></span>`
+      + (fill ? `<label>Couleur <input type="color" data-vfill value="${fill}"></label>` : '<span class="hint">Couleur en dégradé ou en motif : non modifiable.</span>')
+      + (!vs.sh.copyId && (ed.m || ed.fill) ? '<button class="btn" data-act="vreset" title="Remettre le bloc comme dans le PDF d\'origine">Rétablir</button>' : '')
+      + `<button class="btn danger" data-act="vdel" title="Supprimer (Suppr)">${icon('trash')}Supprimer</button>`
+      + '<span class="hint">Faites glisser pour déplacer, poignée bleue pour redimensionner (Maj : garder les proportions).</span>';
+    el.querySelector('[data-vfill]')?.addEventListener('change', e => vChange({ fill: e.target.value }));
+    el.querySelector('[data-act=vreset]')?.addEventListener('click', () => vChange(null));
+    el.querySelector('[data-act=vdel]').addEventListener('click', vDelete);
+    return;
+  }
   const a = selAnnot(), t = S.tool;
   let ctx = a ? (a.type === 'rect' ? (a.erase ? 'erase' : a.kind) : a.type === 'line' ? 'shape' : a.type) : t;
   ctx = TOOL_CTX[ctx] || ctx;
@@ -1392,7 +1830,9 @@ function updateProps(force) {
   if (!S.pages.length) h = '';
   else if (ctx === 'text' || ctx === 'edittext' && a) {
     const s = a || S.style.text;
-    h = `<label><span class="sr">Police</span><select data-g="text" data-k="font">${Object.entries(FONTS).map(([k, f]) => `<option value="${k}"${k === s.font ? ' selected' : ''}>${f.label}</option>`).join('')}</select></label>
+    const orig = a?.psName && DYN.get(a.psName), origOk = orig && dynOf(a);
+    h = `<label><span class="sr">Police</span><select data-g="text" data-k="font">${orig ? `<option value="__orig" selected>Police d'origine (${escHtml(a.psName)})</option>` : ''}${Object.entries(FONTS).map(([k, f]) => `<option value="${k}"${!orig && k === s.font ? ' selected' : ''}>${f.label}</option>`).join('')}</select></label>
+      ${orig && !origOk ? `<span class="hint" title="La police intégrée au PDF ne contient que les lettres déjà utilisées dans le document">Lettres absentes de la police d'origine : ${escHtml(FONTS[a.font]?.label || a.font)} utilisée</span>` : ''}
       ${hasFace(s.font, 'b') ? `<button class="btn icon toggle" data-g="text" data-k="bold" aria-pressed="${!!s.bold}" title="Gras" style="font-weight:700">G</button>` : ''}
       ${hasFace(s.font, 'i') ? `<button class="btn icon toggle" data-g="text" data-k="italic" aria-pressed="${!!s.italic}" title="Italique" style="font-style:italic;font-family:Georgia,serif">I</button>` : ''}
       <label>Taille <input type="number" min="4" max="200" step="0.5" data-g="text" data-k="size" value="${s.size}"></label>
@@ -1400,7 +1840,7 @@ function updateProps(force) {
       <label title="Espace ajouté entre les lettres, en multiple de la taille">Espacement <input type="number" min="-0.2" max="1" step="0.01" data-g="text" data-k="ls" value="${s.ls || 0}"></label>${color('text', s.color)}`;
     if (!a) h += `<span class="hint">Cliquez sur la page pour écrire. Ctrl+Entrée pour valider.</span>`;
     else if (a.type === 'text' && selIds().length === 1) h += `<button class="btn" data-act="textlink" title="${a.link ? escHtml(linkLabel({ target: a.link })) : 'Rendre ce texte cliquable'}">${icon('link')}${a.link ? 'Modifier le lien' : 'Lien…'}</button>`
-      + (a.link ? '<button class="btn" data-act="unlink">Retirer le lien</button>' : '');
+      + (a.link ? `<button class="btn" data-act="golink">${a.link.kind === 'page' ? 'Aller à la page' : 'Ouvrir le lien'}</button><button class="btn" data-act="unlink">Retirer le lien</button>` : '');
   } else if (ctx === 'edittext') {
     h = `<span class="hint">Cliquez sur un texte du PDF pour le réécrire (zones repérées en bleu au survol). À l'enregistrement, l'ancien texte est réellement supprimé du fichier.</span>`;
   } else if (ctx === 'ink') {
@@ -1438,7 +1878,7 @@ function updateProps(force) {
     else h = `<span class="hint">${t === 'fcheck' ? 'Cliquez pour placer une case à cocher.' : 'Faites glisser pour dessiner un champ (ou cliquez pour une taille standard).'} Les champs seront remplissables dans tout lecteur PDF.</span>`;
   } else if (ctx === 'link') {
     h = a ? `<span class="hint">${escHtml(linkLabel(a))}</span><button class="btn" data-act="editlink">Modifier le lien</button>`
-        + (a.target.kind === 'page' ? '<button class="btn" data-act="golink">Aller à la page</button>' : '')
+        + `<button class="btn" data-act="golink">${a.target.kind === 'page' ? 'Aller à la page' : 'Ouvrir le lien'}</button>`
       : '<span class="hint">Faites glisser sur le texte ou la zone à rendre cliquable (ou cliquez pour une taille standard), puis choisissez la destination.</span>';
   } else if (ctx === 'crop') {
     h = `<span class="hint">Faites glisser sur la partie de la page à garder.</span>`
@@ -1504,14 +1944,18 @@ function updateProps(force) {
   el.querySelector('[data-act=opennote]')?.addEventListener('click', () => { const v = V.get(S.sel.pid); if (v) openNote(v, a); });
   el.querySelector('[data-act=cropall]')?.addEventListener('click', cropAll);
   el.querySelector('[data-act=editlink]')?.addEventListener('click', () => { const v = V.get(S.sel.pid); if (v) editLink(v, a); });
-  el.querySelector('[data-act=golink]')?.addEventListener('click', () => { const i = S.pages.findIndex(p => p.id === a.target.page); if (i < 0) toast('Cette page a été supprimée.'); else scrollToPage(i); });
+  el.querySelector('[data-act=golink]')?.addEventListener('click', () => followLink(a.type === 'text' ? a.link : a.target));
   el.querySelector('[data-act=cropoff]')?.addEventListener('click', () => { snapshot(); delete S.pages[S.cur].crop; redrawAll(); propsKey = ''; updateProps(); });
 }
 function setStyle(g, k, val) {
+  if (val === '__orig') return;
   S.style[g][k] = val;
+  // Choisir une police, le gras ou l'italique abandonne la police d'origine d'un texte remplacé
+  const dropOrig = g === 'text' && ['font', 'bold', 'italic'].includes(k);
   // Appliqué à tous les éléments sélectionnés du même genre (par exemple la police de plusieurs textes)
-  const list = selAnnots().filter(a => groupOf(a) === g && a[k] !== val && (k !== 'fill' || a.type === 'shape'));
-  if (list.length) { snapshot(); list.forEach(a => { a[k] = val; }); redraw(S.sel.pid); }
+  const list = selAnnots().filter(a => groupOf(a) === g && (a[k] !== val || (dropOrig && a.psName)) && (k !== 'fill' || a.type === 'shape'));
+  if (list.length) { snapshot(); list.forEach(a => { a[k] = val; if (dropOrig) delete a.psName; }); redraw(S.sel.pid); }
+  if (dropOrig && list.length) { propsKey = ''; updateProps(); }
   if (g === 'text' && k === 'font') { propsKey = ''; updateProps(); }   // gras et italique selon la police
 }
 /* ---------- Copier, coller, dupliquer, déplacer au clavier ---------- */
@@ -1606,7 +2050,8 @@ function renderThumbs() {
 }
 async function drawThumb(d) {
   const p = S.pages.find(x => x.id === d.dataset.id); if (!p) return;
-  const pg = await getPdfPage(p), rotation = ((pg.rotate || 0) + p.rot) % 360;
+  let pg; try { pg = await renderPage(p); } catch { pg = await getPdfPage(p); }
+  const rotation = ((pg.rotate || 0) + p.rot) % 360;
   const base = pg.getViewport({ scale: 1, rotation }), k = Math.min(132 / base.width, 170 / base.height);
   const dpr = Math.min(window.devicePixelRatio || 1, 2), vp = pg.getViewport({ scale: k * dpr, rotation });
   const c = d.querySelector('canvas'); c.width = vp.width; c.height = vp.height; c.style.width = vp.width / dpr + 'px'; c.style.height = vp.height / dpr + 'px';
@@ -1690,6 +2135,7 @@ async function assemble(list, { fresh = false } = {}) {
     out.setTitle(S.fileName || 'Document');
   }
   out.getPages().forEach((page, i) => {
+    if (hasVedits(list[i])) AtelierVector.apply(out, page, list[i].vedits);   // blocs de couleur modifiés, à leur place
     const { rot: r, crop: c } = list[i];
     if (r) page.setRotation(degrees(((page.getRotation().angle || 0) + r) % 360));
     if (c) page.setCropBox(c.x0, c.y0, c.x1 - c.x0, c.y1 - c.y0);
@@ -1772,12 +2218,26 @@ async function paintAnnots(out, page, annots, cache) {
       if (a.orig && !imgs[a.orig]) imgs[a.orig] = await embedImage(out, a.orig);   // image complète, gardée pour recadrer plus tard
       page.drawImage(im, { x: a.x, y: a.y, width: a.w, height: a.h, rotate: degrees(a.r || 0) });
     } else if (a.type === 'text') {
-      const fc = faceOf(a), f = fc.std ? await font(fc.std) : await custom(fc.file), tc = lsOf(a);
+      const fc = faceOf(a), tc = lsOf(a);
+      const f = fc.dyn ? await (fonts['dyn:' + fc.dyn.ps] ??= (out.registerFontkit(window.fontkit), out.embedFont(fc.dyn.bytes, { subset: true })))
+        : fc.std ? await font(fc.std) : await custom(fc.file);
       if (tc) page.pushOperators(pushGraphicsState(), setCharacterSpacing(tc));
       a.text.split('\n').forEach((ln, k) => {
         if (!ln) return;
         const o = add([a.x, a.y], rot([0, -k * lhOf(a)], a.r || 0)), str = safeText(f, ln);
-        page.drawText(str, { x: o[0], y: o[1], size: a.size, font: f, color: col(a.color), rotate: degrees(a.r || 0), opacity: a.opacity ?? 1 });
+        const opt = { size: a.size, font: f, color: col(a.color), rotate: degrees(a.r || 0), opacity: a.opacity ?? 1 };
+        if (!fc.dyn) page.drawText(str, { ...opt, x: o[0], y: o[1] });
+        else {   // police reprise du PDF : son espace n'est souvent pas relu comme un espace, on écrit mot par mot
+          const fk = fc.dyn.fk, sp = (fk.glyphForCodePoint(32)?.advanceWidth || fk.unitsPerEm * 0.28) / fk.unitsPerEm * a.size;
+          let dx = 0;
+          for (const part of str.split(/(\s+)/)) {
+            if (!part) continue;
+            if (/^\s/.test(part)) { dx += part.length * (sp + tc); continue; }
+            const q = add(o, rot([dx, 0], a.r || 0));
+            page.drawText(part, { ...opt, x: q[0], y: q[1] });
+            dx += f.widthOfTextAtSize(part, a.size) + part.length * tc;
+          }
+        }
         drawn.push(str);
       });
       if (tc) page.pushOperators(popGraphicsState());
@@ -1842,6 +2302,7 @@ const visibleAnnots = annots => annots.filter((a, k) => isRedact(a) || !annots.s
 const openPdfjs = (bytes, password) => pdfjsLib.getDocument({
   data: bytes.slice(), password, cMapUrl: PDFJS_BASE + 'cmaps/', cMapPacked: true, standardFontDataUrl: PDFJS_BASE + 'standard_fonts/',
   wasmUrl: PDFJS_BASE + 'wasm/', iccUrl: PDFJS_BASE + 'iccs/', enableXfa: false,
+  fontExtraProperties: true,   // nom et données des polices : « Modifier texte » réutilise la police d'origine
 }).promise;
 
 // Mots d'un élément de texte pdf.js, avec leur boîte (position estimée au prorata de la largeur)
@@ -2946,8 +3407,9 @@ window.addEventListener('keydown', e => {
   if (mod) return;
   const arrow = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
   if (arrow && S.sel) { e.preventDefault(); const d = e.shiftKey ? 10 : 1; nudgeSel(arrow[0] * d, arrow[1] * d); return; }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && S.vsel) { e.preventDefault(); vDelete(); return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && S.sel) { e.preventDefault(); deleteSel(); return; }
-  if (e.key === 'Escape') { if (!$('#findbar').hidden) return closeFind(); S.sel ? setSel(null) : setTool('select'); return; }
+  if (e.key === 'Escape') { if (!$('#findbar').hidden) return closeFind(); S.sel || S.vsel ? setSel(null) : setTool('select'); return; }
   if (!S.pages.length) return;
   if (KEYS[k]) setTool(KEYS[k]);
 });
@@ -2956,7 +3418,7 @@ window.addEventListener('beforeunload', e => { if (S.dirty) { e.preventDefault()
 // Application Windows : PDF ouvert par double-clic dans l'Explorateur
 window.desktop?.onOpenFile(f => addFiles([new File([f.bytes], f.name, { type: 'application/pdf' })], true, f.dir));
 
-if (location.hash === '#test') window.__atelier = { S, sampleFile, addFiles, exportPdf, buildPdf, openPdfjs, rebuild, setTool, producePdf, runFind, markAllHits, makeStamp, safeUrl, openOcr, openClean, openHeaderFooter, openWatermark, openProps, openProtect, openCompress, splitDoc, deletePages, exportImages, copySel, pasteClip, nudgeSel, setSel, fontsReady, selectMany, selectAll, selAnnots, alignSel, distributeSel, deleteSel, annotBox: a => annotBox(a), V, replaceImage, enterCrop, exitCrop, setCropFit, bakeImage };   // tests automatiques
+if (location.hash === '#test') window.__atelier = { S, sampleFile, addFiles, exportPdf, buildPdf, openPdfjs, rebuild, setTool, producePdf, runFind, markAllHits, makeStamp, safeUrl, openOcr, openClean, openHeaderFooter, openWatermark, openProps, openProtect, openCompress, splitDoc, deletePages, exportImages, copySel, pasteClip, nudgeSel, setSel, fontsReady, selectMany, selectAll, selAnnots, alignSel, distributeSel, deleteSel, annotBox: a => annotBox(a), V, replaceImage, enterCrop, exitCrop, setCropFit, bakeImage, followLink, pdfLinkTarget, vHit, setVsel, vSel, vChange, vDelete, renderPage, shapesOf, replaceTextAt, ensureText, itemAt, fontOf, DYN, undo, appBytes };   // tests automatiques
 
 setTool('select'); updateUI();
 fontsReady.then(() => { if (S.pages.length) redrawAll(); });

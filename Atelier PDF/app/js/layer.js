@@ -147,6 +147,7 @@ function sanitize(a) {
       if (num(a.lh, 0.5, 5)) o.lh = a.lh;
       if (num(a.ls, -0.5, 2)) o.ls = a.ls;
       if (num(a.opacity, 0, 1)) o.opacity = a.opacity;
+      if (typeof a.psName === 'string' && /^[\w.+ -]{1,80}$/.test(a.psName)) o.psName = a.psName;   // police d'origine d'un texte remplacé
       const l = link(a.link); if (l) o.link = l;
       return o;
     }

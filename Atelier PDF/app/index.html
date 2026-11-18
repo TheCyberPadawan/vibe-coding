@@ -13,6 +13,7 @@
 <script src="vendor/fontkit.umd.min.js"></script>
 <script src="js/layer.js"></script>
 <script src="js/redact.js"></script>
+<script src="js/vector.js"></script>
 <script src="js/pdfcrypt.js"></script>
 <script src="js/sanitize.js"></script>
 <script src="js/compress.js"></script>
@@ -118,6 +119,7 @@ body[data-tool="image"] .page svg.overlay{cursor:crosshair}
 .handle{cursor:nwse-resize}
 .selbox rect{fill:none;stroke:var(--sel)}
 .selbox .handle{fill:var(--sel);stroke:var(--paper)}
+.vghost{opacity:.85;stroke:var(--sel);pointer-events:none}
 .hoverbox{fill:rgba(31,115,216,.12);stroke:var(--sel)}
 .guide{stroke:#e0247a;pointer-events:none}
 .cropframe{stroke:var(--sel);pointer-events:none}
@@ -131,6 +133,8 @@ body .page svg.overlay .annot image{cursor:inherit}
 .forms{position:absolute;inset:0;pointer-events:none}
 .forms > *{position:absolute;pointer-events:auto;margin:0;border:0;border-bottom:1px solid var(--field-line);background:var(--field);color:var(--paper-ink);padding:0 3px;border-radius:2px;color-scheme:light}
 .forms textarea{resize:none;line-height:1.15}
+.forms > a.pdflink{background:transparent;border:0;border-radius:2px;padding:0;cursor:pointer}
+.forms > a.pdflink:hover,.forms > a.pdflink:focus-visible{background:rgba(31,115,216,.14);outline:1px solid rgba(31,115,216,.5)}
 .forms input[type=checkbox],.forms input[type=radio]{accent-color:var(--sel);border:0;padding:0}
 body:not([data-tool="select"]) .forms > *{pointer-events:none}
 textarea.editor{position:absolute;z-index:3;margin:0;padding:0;border:0;outline:1.5px dashed var(--sel);outline-offset:3px;background:transparent;resize:none;overflow:hidden;white-space:pre;line-height:1.2;color-scheme:light}

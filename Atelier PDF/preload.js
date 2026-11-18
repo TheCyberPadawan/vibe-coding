@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('desktop', {
   pickDir: dir => ipcRenderer.invoke('pick-dir', dir),
   writeInDir: (name, bytes) => ipcRenderer.invoke('write-in-dir', name, bytes),
   print: pages => ipcRenderer.invoke('print', pages),
+  openUrl: url => ipcRenderer.invoke('open-url', url),
+  findFont: name => ipcRenderer.invoke('find-font', name),
   dirOf: file => {
     try { return (webUtils.getPathForFile(file) || '').replace(/[\\/][^\\/]*$/, ''); } catch { return ''; }
   },
