@@ -5,7 +5,7 @@ Cartographie du **réseau local** : NetVision découvre les appareils connectés
 ## Fonctions
 
 - **Scan** du sous-réseau (ping + ARP + sonde de ports) en une dizaine de secondes.
-- **Carte radiale** (la box au centre, les appareils autour) et vue en liste. Les anneaux s'agrandissent avec le nombre d'appareils, qui ne se chevauchent jamais : on **zoome** à la molette (ou en pinçant le pavé tactile, ou avec + et −), on **déplace** la carte en la faisant glisser, et le bouton « Tout afficher » (ou 0, ou un double-clic dans le vide) la recadre en entier.
+- **Carte radiale** (la box au centre, les appareils autour) et vue en liste. Les anneaux s'agrandissent avec le nombre d'appareils, qui ne se chevauchent jamais : on **zoome** à la molette de la souris, en pinçant le pavé tactile, ou avec + et − ; on **déplace** la carte en la faisant glisser, ou en glissant deux doigts sur le pavé tactile ; et le bouton « Tout afficher » (ou 0, ou un double-clic dans le vide) la recadre en entier.
 - Par appareil : IP, adresse MAC, **fabricant** (base OUI intégrée), **type deviné** (box, PC, téléphone, TV, imprimante, caméra, NAS, objet connecté…), ports et services ouverts, temps de réponse.
 - **Détection des nouveaux appareils** d'un scan à l'autre, avec notification — utile pour repérer un intrus sur son Wi-Fi.
 - Renommer un appareil, l'oublier, ouvrir son interface web, actualisation automatique.
@@ -36,7 +36,7 @@ npm install
 npm run dist
 ```
 
-Résultat : **`dist\NetVision Setup 1.1.0.exe`**. Ce fichier installe NetVision comme un vrai programme Windows — raccourcis menu Démarrer et bureau, entrée dans « Applications installées », désinstalleur propre. C'est lui qu'on publie dans les **Releases**.
+Résultat : **`dist\NetVision Setup 1.1.1.exe`**. Ce fichier installe NetVision comme un vrai programme Windows — raccourcis menu Démarrer et bureau, entrée dans « Applications installées », désinstalleur propre. C'est lui qu'on publie dans les **Releases**.
 
 > - Si PowerShell bloque npm (« l'exécution de scripts est désactivée »), utilisez **`npm.cmd`** à la place de `npm`, ou autorisez les scripts : `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 > - Le premier build télécharge Electron (~100 Mo, mis en cache ensuite, donc les builds suivants sont rapides).

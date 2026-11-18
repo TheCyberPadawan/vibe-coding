@@ -242,11 +242,15 @@ document.addEventListener("keydown", e => {
 /* ---------- Zoom et déplacement de la carte ---------- */
 {
   const map = $("#map");
+  // Molette de souris : crans réguliers (multiples de 120), jamais de mouvement horizontal.
+  // Pavé tactile : petites valeurs continues, souvent avec un peu d'horizontal.
+  const isMouseWheel = e => e.deltaMode === 1 || (e.deltaX === 0 && e.wheelDeltaY && e.wheelDeltaY % 120 === 0 && Math.abs(e.deltaY) >= 50);
   map.addEventListener("wheel", e => {
     e.preventDefault();
-    const r = map.getBoundingClientRect();
-    // Pavé tactile (pincer) = petits pas avec Ctrl ; molette = pas réguliers
-    zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), e.clientX - r.left, e.clientY - r.top);
+    const r = map.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    if (e.ctrlKey) zoomAt(Math.exp(-e.deltaY * 0.01), mx, my);              // pincer (ou Ctrl + molette)
+    else if (isMouseWheel(e)) zoomAt(Math.exp(-e.deltaY * 0.0015), mx, my); // molette : zoom
+    else { Z.auto = false; Z.tx -= e.deltaX; Z.ty -= e.deltaY; applyZoom(); } // deux doigts : déplacer
   }, { passive: false });
   let drag = null;
   map.addEventListener("pointerdown", e => {
