@@ -135,7 +135,15 @@ function link(l) {
   if (l?.kind === 'page' && Number.isInteger(l.index) && l.index >= 0 && l.index < 100000) return { kind: 'page', index: l.index };
   return null;
 }
+// Propriétés communes à tous les éléments : groupe (identifiant court) et verrou
 function sanitize(a) {
+  const o = sanitizeOne(a);
+  if (!o) return null;
+  if (typeof a.gid === 'string' && /^[a-z0-9]{1,16}$/.test(a.gid)) o.gid = a.gid;
+  if (a.locked === true) o.locked = true;
+  return o;
+}
+function sanitizeOne(a) {
   if (!a || typeof a !== 'object') return null;
   const o = { id: Math.random().toString(36).slice(2, 10), type: a.type };
   const pos = () => num(a.x) && num(a.y) && (a.r == null || num(a.r, -360, 360)) && Object.assign(o, { x: a.x, y: a.y, r: a.r || 0 });

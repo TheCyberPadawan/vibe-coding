@@ -187,6 +187,14 @@ dialog::backdrop{background:rgba(10,20,18,.45)}
 .menu button:hover:not(:disabled),.menu button:focus-visible{background:var(--hover)}
 .menu button:disabled{opacity:.45;cursor:default}
 .menu button[aria-checked="true"]{color:var(--accent);font-weight:600}
+.menu .kbd{margin-left:auto;padding-left:24px;font-size:12px;opacity:.6}
+.lockmark{display:none;cursor:pointer}
+body[data-tool="select"] .lockmark{display:inline;pointer-events:visiblePainted}
+.lockmark .bg{fill:var(--sel);opacity:.9}
+.lockmark:hover .bg{opacity:1}
+.lockmark .shackle{fill:none;stroke:#fff;stroke-width:1.6}
+.lockmark .body{fill:#fff}
+body .page svg.overlay .annot.locked{pointer-events:none;cursor:default}
 .menu hr{border:0;border-top:1px solid var(--line);margin:5px 4px}
 #tools{display:flex;flex-wrap:wrap;gap:4px}
 .tgroup{display:inline-flex;align-items:center}
@@ -263,7 +271,7 @@ dialog::backdrop{background:rgba(10,20,18,.45)}
     <button class="btn fileact" id="btnOpen" title="Ouvrir un PDF ou des images (Ctrl+O)"><i data-icon="open"></i><span class="lbl">Ouvrir</span></button>
     <button class="btn fileact needdoc" id="btnAdd" title="Ajouter un autre PDF ou des images à la fin (fusion)"><i data-icon="merge"></i><span class="lbl">Fusionner</span></button>
     <button class="btn fileact needdoc" data-menu="mPages" aria-haspopup="menu" title="Insérer, extraire, diviser, recadrer des pages"><i data-icon="pages"></i><span class="lbl">Pages</span><i data-icon="caret"></i></button>
-    <button class="btn fileact needdoc" data-menu="mTools" aria-haspopup="menu" title="En-tête, filigrane, OCR, protection, nettoyage, compression, export"><i data-icon="tools"></i><span class="lbl">Outils</span><i data-icon="caret"></i></button>
+    <button class="btn fileact needdoc" data-menu="mTools" aria-haspopup="menu" title="Grouper, verrouiller, en-tête, filigrane, OCR, protection, nettoyage, compression, export"><i data-icon="tools"></i><span class="lbl">Outils</span><i data-icon="caret"></i></button>
     <span class="spacer"></span>
     <button class="btn icon needdoc" id="btnFind" title="Rechercher (Ctrl+F)" aria-label="Rechercher"><i data-icon="search"></i></button>
     <button class="btn icon needdoc" id="btnPrint" title="Imprimer (Ctrl+P)" aria-label="Imprimer"><i data-icon="print"></i></button>
@@ -349,6 +357,11 @@ dialog::backdrop{background:rgba(10,20,18,.45)}
   <button role="menuitem" id="btnCrop">Recadrer les pages…</button>
 </div>
 <div class="menu" id="mTools" role="menu" hidden>
+  <button role="menuitem" id="btnGroup">Grouper la sélection<span class="kbd">Ctrl+G</span></button>
+  <button role="menuitem" id="btnUngroup">Dégrouper<span class="kbd">Ctrl+Maj+G</span></button>
+  <button role="menuitem" id="btnLock">Verrouiller la sélection<span class="kbd">Ctrl+L</span></button>
+  <button role="menuitem" id="btnUnlockAll">Tout déverrouiller sur cette page<span class="kbd">Ctrl+Maj+L</span></button>
+  <hr>
   <button role="menuitem" id="btnHeader">En-tête, pied de page et numéros…</button>
   <button role="menuitem" id="btnWatermark">Filigrane…</button>
   <hr>
@@ -364,6 +377,7 @@ dialog::backdrop{background:rgba(10,20,18,.45)}
   <button role="menuitem" id="btnExportTxt">Exporter le texte…</button>
 </div>
 <div class="menu" id="mGroup" role="menu" hidden></div>
+<div class="menu" id="mCtx" role="menu" hidden></div>
 <div id="toast" hidden></div>
 <div id="busy" hidden><div id="busyText">Chargement…</div></div>
 

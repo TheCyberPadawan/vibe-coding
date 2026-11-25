@@ -21,6 +21,10 @@ const ICONS = {
   sign:'<path d="M3 16c2-6 4-10 6-10s-1 9 1 9 3-5 5-5-1 5 1 5 2-2 4-3"/><path d="M3 21h18"/>',
   image:'<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>',
   trash:'<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  group:'<rect x="3" y="3" width="10" height="8" rx="1"/><rect x="11" y="13" width="10" height="8" rx="1"/><path d="M8 11v4h3M16 13V9h-3"/>',
+  ungroup:'<rect x="3" y="3" width="8" height="7" rx="1"/><rect x="13" y="14" width="8" height="7" rx="1"/><path d="M14 4h6v6M4 14v6h6" stroke-dasharray="2 2"/>',
+  lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  unlock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>',
   rotr:'<path d="M20 12a8 8 0 1 1-2.3-5.6L20 9"/><path d="M20 4v5h-5"/>',
   rotl:'<path d="M4 12a8 8 0 1 0 2.3-5.6L4 9"/><path d="M4 4v5h5"/>',
   form:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h6M7 17h4"/>',
@@ -448,7 +452,7 @@ async function rebuild() {
     wrap.append(el, label);
     const view = { p, pg, vp, el, canvas, svg, g, forms, wrap, rotation, rendered: false, task: null, text: null };
     el.addEventListener('pointerdown', e => {   // clic dans le vide : désélectionne, ou tire un cadre de sélection
-      if (S.tool !== 'select' || e.button !== 0 || e.target.closest('.annot, [data-handle], .forms > *, textarea')) return;
+      if (S.tool !== 'select' || e.button !== 0 || e.target.closest('.annot:not(.locked), [data-handle], .lockmark, .forms > *, textarea')) return;
       commitEditor();
       const extend = e.shiftKey || e.ctrlKey || e.metaKey, keep = extend && S.sel?.pid === p.id ? selIds() : [];
       // Texte ou bloc de couleur du PDF sous la souris : Maj/Ctrl l'ajoute ou le retire de la sélection ;
@@ -473,7 +477,7 @@ async function rebuild() {
       el.style.cursor = !e.target.closest('.annot, .forms > *, textarea') && vHit(view, toPdf(e, view)) ? 'move' : '';
     });
     el.addEventListener('dblclick', async e => {   // double-clic sur un texte du PDF : le modifier directement
-      if (S.tool !== 'select' || e.target.closest('.annot, [data-handle], .forms > *, textarea')) return;
+      if (S.tool !== 'select' || e.target.closest('.annot:not(.locked), [data-handle], .lockmark, .forms > *, textarea')) return;
       const P = toPdf(e, view);
       if (itemAt(await ensureText(view), P)) { setSel(null); replaceTextAt(view, P, true); }
     });
@@ -482,6 +486,7 @@ async function rebuild() {
     svg.addEventListener('pointermove', e => onHover(e, view));
     svg.addEventListener('pointerleave', () => clearHover(view));
     svg.addEventListener('dblclick', e => onDbl(e, view));
+    el.addEventListener('contextmenu', e => pageMenu(e, view));
     svg.addEventListener('wheel', e => {   // molette pendant le cadrage d'une image : zoom
       if (!CROP || CROP.v !== view || e.ctrlKey) return;
       e.preventDefault(); e.stopPropagation(); setCropFit({ zoom: CROP.a.fit.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1) }); updateProps(true);
@@ -638,6 +643,7 @@ function roundRectPath(w, h, r) {
 const markLine = a => a.kind === 'underline' ? a.h * 0.14 : a.h * 0.5;   // hauteur du trait dans la boîte
 const markWidth = a => Math.max(0.8, a.h * 0.075);
 function annotNode(a, cls = 'annot') {
+  if (a.locked) cls += ' locked';   // on clique à travers un élément verrouillé
   const g = svgEl('g', a.id ? { 'data-aid': a.id, class: cls } : { class: cls });
   const fr = frameOf(a);
   const t = svgEl('g', { transform: `translate(${fr.x} ${fr.y}) rotate(${fr.r})` }); g.append(t);
@@ -714,8 +720,28 @@ function drawAnnots(v) {
     v.g.append(n);
   });
   for (const h of S.diff || []) if (h.pid === v.p.id) v.g.append(svgEl('rect', { class: 'diff-add', x: 0, y: 0, width: h.w, height: h.h, transform: `translate(${h.x} ${h.y}) rotate(${h.r})` }));
+  // Cadenas des éléments verrouillés (un par groupe), visible avec l'outil Sélection : un clic déverrouille
+  const locks = new Set();
+  for (const a of v.p.annots) {
+    if (!a.locked || locks.has(a.gid || a.id)) continue;
+    locks.add(a.gid || a.id);
+    const b = unionBox(groupMembers(v.p, a).filter(x => x.locked).map(annotBox)), s = 1 / v.vp.scale;
+    const m = svgEl('g', { class: 'lockmark', 'data-unlock': a.id, transform: `translate(${b.x1} ${b.y1}) scale(${s} ${-s})` });
+    const tt = svgEl('title'); tt.textContent = 'Verrouillé : cliquez pour déverrouiller'; m.append(tt);
+    m.append(svgEl('rect', { class: 'bg', x: -15, y: 1, width: 14, height: 14, rx: 3 }), svgEl('path', { class: 'shackle', d: 'M-10.5 7.5V5.5a2.5 2.5 0 0 1 5 0v2' }),
+      svgEl('rect', { class: 'body', x: -12, y: 7.5, width: 8, height: 5.5, rx: 1 }));
+    v.g.append(m);
+  }
   const sel = S.sel && S.sel.pid === v.p.id ? selAnnots() : [];
-  for (const a of sel) {   // poignées seulement quand un seul élément est sélectionné
+  // Groupe sélectionné : un seul cadre et une poignée qui redimensionne tout le groupe
+  const grp = sel.length > 1 && !(ED && sel.includes(ED.a)) && !(CROP && sel.includes(CROP.a)) && S.vsel?.pid !== v.p.id && selGroup();
+  if (grp) {
+    const b = unionBox(grp.map(annotBox)), sg = svgEl('g', { class: 'selbox group' });
+    sg.append(svgEl('rect', { x: b.x0 - 3, y: b.y0 - 3, width: b.x1 - b.x0 + 6, height: b.y1 - b.y0 + 6, 'stroke-width': 1.5, 'stroke-dasharray': '8 3 2 3', 'vector-effect': 'non-scaling-stroke' }));
+    sg.append(svgEl('circle', { class: 'handle', 'data-handle': 'g', cx: b.x1 + 3, cy: b.y0 - 3, r: 6 / v.vp.scale, 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke' }));
+    v.g.append(sg);
+  }
+  for (const a of grp ? [] : sel) {   // poignées seulement quand un seul élément est sélectionné
     if ((ED && ED.a === a) || (CROP && CROP.a === a)) continue;
     const b = localBox(a), fr = frameOf(a), hr = 6 / v.vp.scale, one = sel.length === 1;
     const sg = svgEl('g', { class: 'selbox', transform: `translate(${fr.x} ${fr.y}) rotate(${fr.r})` });
@@ -780,10 +806,126 @@ function selectMany(pid, ids, main = ids[ids.length - 1]) {
   if (prev && prev !== pid) redraw(prev);
   redraw(pid); updateProps();
 }
+// Maj/Ctrl+clic : ajoute ou retire l'élément, ou tout son groupe
 function toggleSel(pid, aid) {
-  if (!S.sel || S.sel.pid !== pid) return setSel(pid, aid);
-  const ids = selIds(), i = ids.indexOf(aid);
-  if (i >= 0) { ids.splice(i, 1); selectMany(pid, ids); } else selectMany(pid, [...ids, aid], aid);
+  const p = S.pages.find(x => x.id === pid), a = p?.annots.find(x => x.id === aid), unit = a ? unitIds(p, a) : [aid];
+  if (!S.sel || S.sel.pid !== pid) return unit.length > 1 ? selectMany(pid, unit, aid) : setSel(pid, aid);
+  const ids = selIds();
+  if (ids.includes(aid)) selectMany(pid, ids.filter(x => !unit.includes(x)));
+  else selectMany(pid, [...ids.filter(x => !unit.includes(x)), ...unit.filter(x => x !== aid), aid], aid);
+}
+
+/* ---------- Groupes et verrous ---------- */
+// Un groupe : les éléments d'une page qui portent le même a.gid. Ils se sélectionnent, se déplacent et se
+// redimensionnent ensemble ; chacun reste un élément ordinaire (enregistré, exporté et annulé comme avant).
+// Un élément verrouillé (a.locked) ne se sélectionne plus à la souris : on clique à travers lui.
+const groupMembers = (p, a) => a.gid ? p.annots.filter(x => x.gid === a.gid) : [a];
+const unitIds = (p, a) => groupMembers(p, a).map(x => x.id);
+// Unités de la sélection : un groupe compte pour un seul élément (aligner, répartir, grouper)
+function selUnits(list = selAnnots()) {
+  const m = new Map();
+  for (const a of list) { const k = a.gid || '#' + a.id; if (!m.has(k)) m.set(k, []); m.get(k).push(a); }
+  return [...m.values()];
+}
+// La sélection est exactement un groupe : tous ses membres et rien d'autre
+function selGroup() {
+  const list = selAnnots(); if (list.length < 2 || !list[0].gid) return null;
+  const p = S.pages.find(x => x.id === S.sel.pid);
+  return list.every(a => a.gid === list[0].gid) && groupMembers(p, list[0]).length === list.length ? list : null;
+}
+// Copies : leurs groupes reçoivent de nouveaux identifiants (sinon la copie rejoindrait le groupe d'origine)
+function freshGids(list) {
+  const m = new Map();
+  for (const a of list) if (a.gid) { if (!m.has(a.gid)) m.set(a.gid, uid()); a.gid = m.get(a.gid); }
+  return list;
+}
+// Un groupe réduit à un seul élément (les autres supprimés) n'en est plus un
+function pruneGroups(p) {
+  const n = new Map(); p.annots.forEach(a => a.gid && n.set(a.gid, (n.get(a.gid) || 0) + 1));
+  p.annots.forEach(a => { if (a.gid && n.get(a.gid) < 2) delete a.gid; });
+}
+function groupSel() {
+  const list = selAnnots();
+  if (selUnits(list).length < 2) return toast(list.length > 1 ? 'Ces éléments forment déjà un groupe.'
+    : S.vsel ? 'Seuls les éléments ajoutés avec Atelier PDF peuvent être groupés.' : 'Sélectionnez au moins deux éléments (Maj+clic ou cadre tiré dans le vide) pour les grouper.');
+  snapshot(); const gid = uid(); list.forEach(a => { a.gid = gid; });   // un groupe dans un groupe : tout est fondu en un seul
+  propsKey = ''; redraw(S.sel.pid); updateProps();
+  toast(`${list.length} éléments groupés. Ctrl+Maj+G pour dégrouper.`, 2500);
+}
+function ungroupSel() {
+  const list = selAnnots().filter(a => a.gid); if (!list.length) return toast('Aucun groupe sélectionné.');
+  snapshot(); list.forEach(a => { delete a.gid; });
+  propsKey = ''; redraw(S.sel.pid); updateProps();
+  toast('Groupe défait : chaque élément se sélectionne de nouveau seul.', 2500);
+}
+function lockSel() {
+  const list = selAnnots(); if (!list.length) return toast("Sélectionnez d'abord l'élément à verrouiller.");
+  snapshot(); list.forEach(a => { a.locked = true; });
+  const pid = S.sel.pid; S.sel = null; redraw(pid); updateProps();
+  toast(`${selUnits(list).length > 1 ? 'Verrouillés' : 'Verrouillé'} : ne se sélectionne plus au clic. Pour déverrouiller : cadenas, clic droit ou Ctrl+Maj+L.`, 4500);
+}
+function unlockAnnots(p, list) {
+  if (!list.length) return;
+  snapshot(); list.forEach(a => { delete a.locked; });
+  if (S.tool !== 'select') setTool('select');
+  selectMany(p.id, list.map(a => a.id));
+}
+function unlockAll(p = S.pages[S.cur]) {
+  const list = p ? p.annots.filter(a => a.locked) : [];
+  if (!list.length) return toast('Aucun élément verrouillé sur cette page.');
+  unlockAnnots(p, list);
+  toast(`${selUnits(list).length > 1 ? `${selUnits(list).length} éléments déverrouillés` : 'Élément déverrouillé'} (sélectionnés).`, 2500);
+}
+// Poignée d'un groupe : tout est agrandi ou réduit dans les mêmes proportions, coin haut gauche fixe
+function scaleAnnot(a, o, k, ax, ay) {
+  const at = (x, y) => [r2(ax + (x - ax) * k), r2(ay + (y - ay) * k)], w = n => r2(Math.min(100, n * k));
+  if (o.type === 'ink') { a.strokes = o.strokes.map(s => s.map(([x, y]) => at(x, y))); a.width = w(o.width); return; }
+  if (o.type === 'line') { const [x1, y1] = at(o.x1, o.y1), [x2, y2] = at(o.x2, o.y2); Object.assign(a, { x1, y1, x2, y2, width: w(o.width) }); return; }
+  [a.x, a.y] = at(o.x, o.y);
+  if (BOXED.has(o.type)) { a.w = r2(o.w * k); a.h = r2(o.h * k); }
+  if (o.type === 'text') a.size = r2(Math.min(500, Math.max(1, o.size * k)));   // interligne et espacement suivent (relatifs à la taille)
+  if (o.type === 'shape') { a.width = w(o.width); if (o.rx) a.rx = r2(o.rx * k); }
+}
+function groupResize(e, v) {
+  const list = selAnnots(); if (list.length < 2) return;
+  const origs = list.map(clone), b = unionBox(origs.map(annotBox)), bw = Math.max(1, b.x1 - b.x0), bh = Math.max(1, b.y1 - b.y0);
+  const ax = b.x0, ay = b.y1, kmin = 8 / Math.max(bw, bh), start = toPdf(e, v), snap = serialize();
+  let moved = false;
+  capture(v, e, ev => {
+    const P = toPdf(ev, v);
+    if (!moved) { if (Math.hypot(P[0] - start[0], P[1] - start[1]) * v.vp.scale < 2) return; pushSnap(snap); moved = true; }
+    // Projection du pointeur sur la diagonale du cadre : un seul facteur pour les deux sens
+    const k = Math.max(kmin, ((P[0] - ax) * bw + (ay - P[1]) * bh) / (bw * bw + bh * bh));
+    list.forEach((a, i) => scaleAnnot(a, origs[i], k, ax, ay));
+    drawAnnots(v);
+  }, () => { if (moved) { propsKey = ''; updateProps(); } });
+}
+// Clic droit sur la page : grouper, dégrouper, verrouiller la sélection ; déverrouiller ce qui est sous la souris
+function pageMenu(e, v) {
+  if (e.target.closest('textarea, .forms > *')) return;
+  e.preventDefault(); commitEditor();
+  const p = v.p, P = toPdf(e, v), hit = hitAnnot(e, v);
+  if (hit && !(S.sel?.pid === p.id && selIds().includes(hit.id))) { if (S.tool !== 'select') setTool('select'); selectMany(p.id, unitIds(p, hit), hit.id); }
+  const under = p.annots.filter(a => { if (!a.locked) return false; const b = annotBox(a); return P[0] >= b.x0 && P[0] <= b.x1 && P[1] >= b.y0 && P[1] <= b.y1; }).pop();
+  const sel = S.sel?.pid === p.id ? selAnnots() : [], units = selUnits(sel), items = [];
+  if (sel.length) {
+    if (units.length > 1) items.push(['group', 'Grouper', 'Ctrl+G', groupSel]);
+    if (units.some(u => u.length > 1)) items.push(['ungroup', 'Dégrouper', 'Ctrl+Maj+G', ungroupSel]);
+    items.push(['lock', units.length > 1 ? 'Verrouiller la sélection' : 'Verrouiller', 'Ctrl+L', lockSel]);
+  }
+  if (under) {
+    const m = groupMembers(p, under);
+    items.push(['unlock', m.length > 1 ? 'Déverrouiller ce groupe' : 'Déverrouiller cet élément', '', () => { unlockAnnots(p, m); toast('Déverrouillé.', 1500); }]);
+  }
+  if (p.annots.some(a => a.locked)) items.push(['unlock', 'Tout déverrouiller sur la page', 'Ctrl+Maj+L', () => unlockAll(p)]);
+  if (!items.length) return;
+  const menu = $('#mCtx');
+  menu.innerHTML = items.map(([ic, lbl, key], i) => `<button role="menuitem" data-ctx="${i}">${icon(ic)}${escHtml(lbl)}${key ? `<span class="kbd">${key}</span>` : ''}</button>`).join('');
+  menu.querySelectorAll('[data-ctx]').forEach(b => b.addEventListener('click', () => items[+b.dataset.ctx][3]()));
+  closeMenu(); menu.hidden = false;
+  menu.style.left = Math.min(e.clientX, innerWidth - menu.offsetWidth - 8) + 'px';
+  menu.style.top = Math.min(e.clientY, innerHeight - menu.offsetHeight - 8) + 'px';
+  openMenu = menu; menu.querySelector('button')?.focus();
 }
 function setTool(t) {
   commitEditor();
@@ -826,7 +968,7 @@ function redo() { commitEditor(); if (!S.redo.length) return; S.undo.push(serial
 
 /* ---------- Interactions sur la page ---------- */
 function toPdf(e, v) { const r = v.svg.getBoundingClientRect(); return v.vp.convertToPdfPoint(e.clientX - r.left, e.clientY - r.top); }
-function hitAnnot(e, v) { const n = e.target.closest?.('[data-aid]'); return n ? v.p.annots.find(a => a.id === n.dataset.aid) : null; }
+function hitAnnot(e, v) { const n = e.target.closest?.('[data-aid]'), a = n && v.p.annots.find(x => x.id === n.dataset.aid); return a && !a.locked ? a : null; }
 // Maj : angle multiple de 45° depuis le point de départ
 function snap45(P, Q) {
   const dx = Q[0] - P[0], dy = Q[1] - P[1], len = Math.hypot(dx, dy), ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * Math.PI / 4;
@@ -839,14 +981,18 @@ function onDown(e, v) {
   commitEditor();
   const P = toPdf(e, v), p = v.p, R = v.rotation, t = S.tool, hit = hitAnnot(e, v);
   if (t === 'select') {
+    const lk = e.target.closest('[data-unlock]');   // cadenas d'un élément verrouillé
+    if (lk) { const a = p.annots.find(x => x.id === lk.dataset.unlock); if (a) { unlockAnnots(p, groupMembers(p, a)); toast('Déverrouillé.', 1500); } return; }
     const hd = e.target.closest('[data-handle]');
     if (hd?.dataset.handle === 'v') { const vs = vSel(); if (vs) return vDrag(e, v, vs.sh, v.svg); }
+    if (hd?.dataset.handle === 'g') return groupResize(e, v);
     if (hd) { const a = selAnnot(); if (a) return drag(e, v, a, 'resize', null, hd.dataset.handle); }
     if (hit && S.vsel?.pid === p.id && S.sel?.pid === p.id && selIds().includes(hit.id) && !(e.shiftKey || e.ctrlKey || e.metaKey))
       return groupMove(e, v, v.svg, () => setSel(p.id, hit.id));   // groupe mêlant ajouts et éléments du PDF
     if (hit) {
+      const unit = unitIds(p, hit);   // l'élément, ou tout son groupe
       if ((e.shiftKey || e.ctrlKey || e.metaKey) && S.vsel?.pid === p.id) {   // ajout ajouté à un groupe d'éléments du PDF
-        const ids = selIds(), on = ids.includes(hit.id), next = on ? ids.filter(x => x !== hit.id) : [...ids, hit.id];
+        const ids = selIds(), on = ids.includes(hit.id), next = on ? ids.filter(x => !unit.includes(x)) : [...ids.filter(x => !unit.includes(x)), ...unit];
         S.sel = next.length ? { pid: p.id, aid: next[next.length - 1], more: next.slice(0, -1) } : null;
         drawAnnots(v); updateProps(); return;
       }
@@ -855,10 +1001,11 @@ function onDown(e, v) {
         toggleSel(p.id, hit.id);
         return drag(e, v, hit, 'move');
       }
-      const inGroup = S.sel?.pid === p.id && selIds().length > 1 && selIds().includes(hit.id);
-      if (inGroup) selectMany(p.id, selIds(), hit.id); else setSel(p.id, hit.id);
-      // Dans un groupe, un simple clic sans déplacer ne garde que l'élément cliqué
-      return drag(e, v, hit, 'move', hit.type === 'note' ? () => openNote(v, hit) : inGroup ? () => setSel(p.id, hit.id) : null);
+      const inSel = S.sel?.pid === p.id && selIds().includes(hit.id), inGroup = inSel && selIds().length > unit.length;
+      if (inSel) selectMany(p.id, selIds(), hit.id); else if (unit.length > 1) selectMany(p.id, unit, hit.id); else setSel(p.id, hit.id);
+      // Dans une sélection multiple, un simple clic sans déplacer ne garde que l'élément cliqué (ou son groupe)
+      const keepUnit = () => unit.length > 1 ? selectMany(p.id, unit, hit.id) : setSel(p.id, hit.id);
+      return drag(e, v, hit, 'move', hit.type === 'note' ? () => openNote(v, hit) : inGroup ? keepUnit : null);
     }
     return setSel(null);
   }
@@ -933,7 +1080,7 @@ function drag(e, v, a, mode, onClick, handle) {
       if (Math.hypot(dx, dy) * v.vp.scale < 2) return;
       pushSnap(snap); moved = true;
       if (dup) {
-        group = origs.map(o => { const c = clone(o); c.id = uid(); if (c.type === 'field') c.name = fieldName(c.name); v.p.annots.push(c); return c; });
+        group = freshGids(origs.map(o => { const c = clone(o); c.id = uid(); if (c.type === 'field') c.name = fieldName(c.name); v.p.annots.push(c); return c; }));
         selectMany(v.p.id, group.map(x => x.id), group[origs.findIndex(o => o.id === a.id)]?.id);
       }
       if (mode === 'move') targets = snapTargets(v, new Set(group.map(x => x.id)));   // les originaux servent de repères pour la copie
@@ -1094,7 +1241,7 @@ function groupMove(e, v, el, onClick) {
     if (!moved && Math.hypot(Q[0] - start[0], Q[1] - start[1]) * v.vp.scale < 3) return;
     if (!moved) {
       pushSnap(snap); moved = true; v.vcrops = textCrops(v, items);
-      if (dup) annots = orig.map(o => { const c = clone(o); c.id = uid(); if (c.type === 'field') c.name = fieldName(c.name); p.annots.push(c); return c; });
+      if (dup) annots = freshGids(orig.map(o => { const c = clone(o); c.id = uid(); if (c.type === 'field') c.name = fieldName(c.name); p.annots.push(c); return c; }));
     }
     annots.forEach((a, i) => { placeLike(a, orig[i]); shiftAnnot(a, dx, dy); });
     v.vghost = items.length ? items.map(sh => ({ sh, m: at(sh) })) : null;
@@ -1165,7 +1312,7 @@ function vDelete() {
   let next = p.vedits;
   for (const sh of list) next = sh.copyId ? withEdit(next, sh, null) : withEdit(next, sh, { del: true });
   p.vedits = next;
-  if (annots.length) p.annots = p.annots.filter(a => !annots.includes(a));
+  if (annots.length) { p.annots = p.annots.filter(a => !annots.includes(a)); pruneGroups(p); }
   S.vsel = null; S.sel = null; drawAnnots(v); updateProps(); refreshView(v); renderComments();
 }
 
@@ -1185,7 +1332,9 @@ function marquee(e, v, keep, keepV = []) {
     v.el.removeEventListener('pointermove', move); v.el.removeEventListener('pointerup', end); v.el.removeEventListener('pointercancel', end);
     if (!m) return;
     v.marquee = null;
-    const ids = v.p.annots.filter(a => groupable(a) && within(annotBox(a), m)).map(a => a.id), all = [...new Set([...keep, ...ids])];
+    // Un groupe n'est pris que s'il est entièrement dans le cadre ; les éléments verrouillés jamais
+    const inside = new Set(v.p.annots.filter(a => groupable(a) && !a.locked && within(annotBox(a), m)).map(a => a.id));
+    const ids = v.p.annots.filter(a => inside.has(a.id) && groupMembers(v.p, a).every(x => inside.has(x.id))).map(a => a.id), all = [...new Set([...keep, ...ids])];
     const [px0, py0, px1, py1] = v.pg.view, page = (px1 - px0) * (py1 - py0);
     const ords = vList(v).filter(sh => {
       const b = vBox(v.p, sh);
@@ -1279,12 +1428,13 @@ function snapMove(box0, base0, dx, dy, t, tol) {
 /* ---------- Aligner et répartir ---------- */
 function alignSel(how) {
   const list = selAnnots(); if (!list.length) return;
-  const v = V.get(S.sel.pid), boxes = list.map(annotBox);
-  // Plusieurs éléments : alignés entre eux ; un seul : centré sur la page
-  const [px0, py0, px1, py1] = v.pg.view, ref = list.length > 1 ? unionBox(boxes) : { x0: px0, y0: py0, x1: px1, y1: py1 };
+  // Un groupe se déplace d'un bloc : il est aligné comme un seul élément
+  const units = selUnits(list), v = V.get(S.sel.pid), boxes = units.map(u => unionBox(u.map(annotBox)));
+  // Plusieurs éléments : alignés entre eux ; un seul (ou un seul groupe) : centré sur la page
+  const [px0, py0, px1, py1] = v.pg.view, ref = units.length > 1 ? unionBox(boxes) : { x0: px0, y0: py0, x1: px1, y1: py1 };
   const main = selAnnot(), mainBase = baselineOf(main);
   snapshot();
-  list.forEach((a, i) => {
+  units.forEach((u, i) => {
     const b = boxes[i]; let dx = 0, dy = 0;
     if (how === 'left') dx = ref.x0 - b.x0;
     else if (how === 'hcenter') dx = (ref.x0 + ref.x1 - b.x0 - b.x1) / 2;
@@ -1292,22 +1442,22 @@ function alignSel(how) {
     else if (how === 'top') dy = ref.y1 - b.y1;
     else if (how === 'vcenter') dy = (ref.y0 + ref.y1 - b.y0 - b.y1) / 2;
     else if (how === 'bottom') dy = ref.y0 - b.y0;
-    else if (how === 'baseline' && mainBase != null && baselineOf(a) != null) dy = mainBase - a.y;
-    shiftAnnot(a, dx, dy);
+    else if (how === 'baseline' && mainBase != null && u.length === 1 && baselineOf(u[0]) != null) dy = mainBase - u[0].y;
+    u.forEach(a => shiftAnnot(a, dx, dy));
   });
   redraw(S.sel.pid);
 }
-// Espaces égaux entre les éléments, les deux extrêmes restant en place
+// Espaces égaux entre les éléments (un groupe compte pour un), les deux extrêmes restant en place
 function distributeSel(axis) {
-  const list = selAnnots(); if (list.length < 3) return;
+  const units = selUnits(); if (units.length < 3) return;
   const lo = axis === 'h' ? 'x0' : 'y0', hi = axis === 'h' ? 'x1' : 'y1';
-  const items = list.map(a => ({ a, b: annotBox(a) })).sort((p, q) => p.b[lo] + p.b[hi] - q.b[lo] - q.b[hi]);
+  const items = units.map(u => ({ u, b: unionBox(u.map(annotBox)) })).sort((p, q) => p.b[lo] + p.b[hi] - q.b[lo] - q.b[hi]);
   const span = items[items.length - 1].b[hi] - items[0].b[lo], used = items.reduce((s, it) => s + it.b[hi] - it.b[lo], 0);
   const gap = (span - used) / (items.length - 1);
   snapshot();
   let pos = items[0].b[hi] + gap;
   for (const it of items.slice(1, -1)) {
-    const d = pos - it.b[lo]; shiftAnnot(it.a, axis === 'h' ? d : 0, axis === 'h' ? 0 : d);
+    const d = pos - it.b[lo]; it.u.forEach(a => shiftAnnot(a, axis === 'h' ? d : 0, axis === 'h' ? 0 : d));
     pos += it.b[hi] - it.b[lo] + gap;
   }
   redraw(S.sel.pid);
@@ -1822,7 +1972,7 @@ function updateProps(force) {
   let ctx = a ? (a.type === 'rect' ? (a.erase ? 'erase' : a.kind) : a.type === 'line' ? 'shape' : a.type) : t;
   ctx = TOOL_CTX[ctx] || ctx;
   const crop = S.pages[S.cur]?.crop;
-  const key = ctx + '|' + selIds().join(',') + '|' + t + '|' + !!S.pendingSig + '|' + !!crop;
+  const key = ctx + '|' + selIds().join(',') + '|' + selAnnots().map(x => x.gid || '').join(',') + '|' + t + '|' + !!S.pendingSig + '|' + !!crop;
   if (key === propsKey && !force) return; propsKey = key;
   const el = $('#props'); let h = '';
   const color = (g, val, label = 'Couleur', k = 'color') => `<label>${label} <input type="color" data-g="${g}" data-k="${k}" value="${val}"></label>`;
@@ -1897,10 +2047,10 @@ function updateProps(force) {
     h = a ? `<button class="btn" data-act="replaceimg" title="La nouvelle image est recadrée au centre pour remplir le même cadre">${icon('image')}Remplacer l'image…</button><button class="btn" data-act="cropimg" title="Ou double-cliquez sur l'image">${icon('crop')}Recadrer</button><span class="hint">Faites glisser pour déplacer, poignée bleue pour redimensionner.</span>`
           : `<button class="btn" data-act="img">${S.pendingImg ? "Changer d'image" : 'Choisir une image'}</button>` + (S.pendingImg ? '<span class="hint">Cliquez sur la page pour placer l\'image.</span>' : '');
   } else if (ctx === 'select') {
-    h = `<span class="hint" title="Ctrl+A : tout sélectionner · Ctrl+C / Ctrl+V : copier-coller · Ctrl+D : dupliquer · Flèches : ajuster (Maj : ×10) · Alt en déplaçant : déplacer une copie · Ctrl en déplaçant : sans aimant">Cliquez sur un élément pour le déplacer, double-cliquez sur un texte pour le modifier. Maj+clic ou cadre tiré dans le vide : plusieurs éléments.</span>`;
+    h = `<span class="hint" title="Ctrl+A : tout sélectionner · Ctrl+C / Ctrl+V : copier-coller · Ctrl+D : dupliquer · Ctrl+G / Ctrl+Maj+G : grouper / dégrouper · Ctrl+L / Ctrl+Maj+L : verrouiller / tout déverrouiller · Flèches : ajuster (Maj : ×10) · Alt en déplaçant : déplacer une copie · Ctrl en déplaçant : sans aimant">Cliquez sur un élément pour le déplacer, double-cliquez sur un texte pour le modifier. Maj+clic ou cadre tiré dans le vide : plusieurs éléments.</span>`;
   }
   if (a) {
-    const n = selIds().length, texts = selAnnots().filter(x => baselineOf(x) != null).length;
+    const units = selUnits(), n = units.length, grp = selGroup(), texts = units.filter(u => u.length === 1 && baselineOf(u[0]) != null).length;
     const ab = (k, ic, tip) => `<button class="btn icon" data-align="${k}" title="${tip}">${icon(ic)}</button>`;
     const db = (k, ic, tip) => `<button class="btn icon" data-dist="${k}" title="${tip}">${icon(ic)}</button>`;
     h += n > 1
@@ -1909,6 +2059,10 @@ function updateProps(force) {
         + (texts > 1 ? ab('baseline', 'baseline', 'Aligner les lignes de base des textes sur le dernier sélectionné') : '')
         + (n > 2 ? db('h', 'distH', 'Répartir horizontalement') + db('v', 'distV', 'Répartir verticalement') : '') + '</span>'
       : `<span class="aligns" role="group" aria-label="Centrer sur la page">${ab('hcenter', 'alignHC', 'Centrer horizontalement sur la page')}${ab('vcenter', 'alignVC', 'Centrer verticalement sur la page')}</span>`;
+    if (grp) h = `<span class="hint"><b>Groupe de ${grp.length} éléments</b></span>` + h;
+    if (n > 1) h += `<button class="btn" data-act="group" title="Grouper (Ctrl+G) : se sélectionnent, se déplacent et se redimensionnent ensemble">${icon('group')}Grouper</button>`;
+    if (units.some(u => u.length > 1)) h += `<button class="btn" data-act="ungroup" title="Dégrouper (Ctrl+Maj+G)">${icon('ungroup')}Dégrouper</button>`;
+    h += `<button class="btn" data-act="lock" title="Verrouiller (Ctrl+L) : ne se sélectionne plus au clic, pour atteindre facilement ce qui est autour">${icon('lock')}Verrouiller</button>`;
     h += `<button class="btn danger" data-act="del" title="Supprimer (Suppr)">${icon('trash')}Supprimer</button>`;
   }
   el.innerHTML = h;
@@ -1933,6 +2087,9 @@ function updateProps(force) {
   });
   el.querySelector('[data-fmulti]')?.addEventListener('click', e => { snapshot(); a.multiline = !a.multiline; e.currentTarget.setAttribute('aria-pressed', a.multiline); });
   el.querySelector('[data-act=del]')?.addEventListener('click', deleteSel);
+  el.querySelector('[data-act=group]')?.addEventListener('click', groupSel);
+  el.querySelector('[data-act=ungroup]')?.addEventListener('click', ungroupSel);
+  el.querySelector('[data-act=lock]')?.addEventListener('click', lockSel);
   el.querySelectorAll('[data-align]').forEach(b => b.addEventListener('click', () => alignSel(b.dataset.align)));
   el.querySelectorAll('[data-dist]').forEach(b => b.addEventListener('click', () => distributeSel(b.dataset.dist)));
   el.querySelector('[data-act=sig]')?.addEventListener('click', openSig);
@@ -1974,8 +2131,8 @@ function pasteClip() {
   if (!S.clip || !S.pages.length) return;
   const p = S.pages[S.cur] || S.pages[0], same = p.id === S.clip.pid;
   snapshot(); if (same) pasteN++;
-  const ids = S.clip.list.map(o => {
-    const a = clone(o); a.id = uid();
+  const ids = freshGids(S.clip.list.map(clone)).map(a => {
+    a.id = uid();
     if (a.type === 'field') a.name = fieldName(a.name);
     if (same) shiftAnnot(a, 12 * pasteN, -12 * pasteN);   // décalé pour rester visible
     p.annots.push(a); return a.id;
@@ -1988,12 +2145,12 @@ function nudgeSel(dx, dy) {
 }
 function selectAll() {
   const p = S.pages[S.cur]; if (!p) return;
-  setTool('select'); selectMany(p.id, p.annots.filter(groupable).map(a => a.id));
+  setTool('select'); selectMany(p.id, p.annots.filter(a => groupable(a) && !a.locked).map(a => a.id));
 }
 function deleteSel() {
   const list = selAnnots(); if (!list.length) return;
   snapshot(); const p = S.pages.find(x => x.id === S.sel.pid);
-  list.forEach(a => p.annots.splice(p.annots.indexOf(a), 1));
+  list.forEach(a => p.annots.splice(p.annots.indexOf(a), 1)); pruneGroups(p);
   const pid = S.sel.pid; S.sel = null; redraw(pid); updateProps(); renderComments();
 }
 // Même recadrage (en proportion de la page) sur toutes les pages
@@ -3315,7 +3472,7 @@ const ACTIONS = {
   btnDelPages: deletePages, btnRotAll: rotateAll, btnCrop: () => { setTool('crop'); toast('Faites glisser sur la partie de la page à garder.'); },
   btnHeader: openHeaderFooter, btnWatermark: openWatermark, btnOcr: () => openOcr(), btnCompare: () => $('#fileCompare').click(),
   btnProtect: openProtect, btnClean: () => openClean(), btnCompress: () => openCompress(), btnProps: openProps,
-  btnExportImg: exportImages, btnExportTxt: exportText, btnPrint: printDoc, btnFind: openFind,
+  btnExportImg: exportImages, btnExportTxt: exportText, btnGroup: groupSel, btnUngroup: ungroupSel, btnLock: lockSel, btnUnlockAll: () => unlockAll(), btnPrint: printDoc, btnFind: openFind,
 };
 for (const [id, fn] of Object.entries(ACTIONS)) $('#' + id)?.addEventListener('click', () => { if (!S.pages.length) return toast("Ouvrez d'abord un PDF."); commitEditor(); fn(); });
 $('#fileInsert').addEventListener('change', e => { addFiles(e.target.files, false, null, S.cur + 1); e.target.value = ''; });
@@ -3404,6 +3561,8 @@ window.addEventListener('keydown', e => {
   if (mod && k === 'v' && S.clip) { e.preventDefault(); pasteClip(); return; }
   if (mod && k === 'd' && S.sel) { e.preventDefault(); copySel(); pasteClip(); return; }
   if (mod && k === 'a' && S.pages.length) { e.preventDefault(); selectAll(); return; }
+  if (mod && k === 'g' && S.pages.length) { e.preventDefault(); e.shiftKey ? ungroupSel() : groupSel(); return; }
+  if (mod && k === 'l' && S.pages.length) { e.preventDefault(); e.shiftKey ? unlockAll() : lockSel(); return; }
   if (mod) return;
   const arrow = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
   if (arrow && S.sel) { e.preventDefault(); const d = e.shiftKey ? 10 : 1; nudgeSel(arrow[0] * d, arrow[1] * d); return; }
@@ -3418,7 +3577,7 @@ window.addEventListener('beforeunload', e => { if (S.dirty) { e.preventDefault()
 // Application Windows : PDF ouvert par double-clic dans l'Explorateur
 window.desktop?.onOpenFile(f => addFiles([new File([f.bytes], f.name, { type: 'application/pdf' })], true, f.dir));
 
-if (location.hash === '#test') window.__atelier = { S, sampleFile, addFiles, exportPdf, buildPdf, openPdfjs, rebuild, setTool, producePdf, runFind, markAllHits, makeStamp, safeUrl, openOcr, openClean, openHeaderFooter, openWatermark, openProps, openProtect, openCompress, splitDoc, deletePages, exportImages, copySel, pasteClip, nudgeSel, setSel, fontsReady, selectMany, selectAll, selAnnots, alignSel, distributeSel, deleteSel, annotBox: a => annotBox(a), V, replaceImage, enterCrop, exitCrop, setCropFit, bakeImage, followLink, pdfLinkTarget, vHit, setVsel, vSel, vChange, vDelete, renderPage, shapesOf, replaceTextAt, ensureText, itemAt, fontOf, DYN, undo, appBytes };   // tests automatiques
+if (location.hash === '#test') window.__atelier = { S, sampleFile, addFiles, exportPdf, buildPdf, openPdfjs, rebuild, setTool, producePdf, runFind, markAllHits, makeStamp, safeUrl, openOcr, openClean, openHeaderFooter, openWatermark, openProps, openProtect, openCompress, splitDoc, deletePages, exportImages, copySel, pasteClip, nudgeSel, setSel, fontsReady, selectMany, selectAll, selAnnots, alignSel, distributeSel, deleteSel, groupSel, ungroupSel, lockSel, unlockAll, toggleSel, selGroup, undo, redo, annotBox: a => annotBox(a), V, replaceImage, enterCrop, exitCrop, setCropFit, bakeImage, followLink, pdfLinkTarget, vHit, setVsel, vSel, vChange, vDelete, renderPage, shapesOf, replaceTextAt, ensureText, itemAt, fontOf, DYN, appBytes };   // tests automatiques
 
 setTool('select'); updateUI();
 fontsReady.then(() => { if (S.pages.length) redrawAll(); });
