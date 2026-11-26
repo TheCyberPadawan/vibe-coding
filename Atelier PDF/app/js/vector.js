@@ -77,7 +77,10 @@ const TS0 = { font: null, fs: 0, tc: 0, tw: 0, th: 1, tl: 0, rise: 0, tr: 0 };
 // la suite du texte d'origine reprend exactement où elle en était (matrice de ligne et avance rétablies).
 function run(doc, bytes, res, ctm0, gs0, ctx, depth = 0) {
   const ops = AtelierRedact.tokenize(bytes), out = [];
-  let gs = { ctm: ctm0, fill: gs0.fill, ts: gs0.ts }, changed = false, newRes = null, uid = 0;
+  let gs = { ctm: ctm0, fill: gs0.fill, ts: gs0.ts, clips: gs0.clips || [] }, changed = false, newRes = null, uid = 0;
+  // Découpes actives (gs.clips) : chaque découpe (W n) a un numéro ; à la relecture, on note ce qu'elle contient
+  const impure = () => { if (ctx.scan) for (const c of gs.clips) ctx.clipInfo[c].impure = true; };   // dessin qui n'est pas un élément
+  const holds = ord => { if (ctx.scan) for (const c of gs.clips) ctx.clipInfo[c].items.push(ord); };
   const stack = [];
   let pathOps = [], segs = [], clip = false, cur = null, start = null;
   let tm = ID, tlm = ID, k = 0, lost = false;   // matrices de texte ; k : avance depuis le début de ligne ; lost : position inconnue
@@ -110,10 +113,12 @@ function run(doc, bytes, res, ctm0, gs0, ctx, depth = 0) {
     }
     if (o.op === 'W' || o.op === 'W*') { clip = true; pathOps.push(o); continue; }
     if (PAINT.has(o.op)) {
-      const shape = FILL.has(o.op) && !clip && segs.length && segs[0][0] !== 'bad';
-      if (shape) {
+      const ok = !clip && segs.length && segs[0][0] !== 'bad';
+      // Forme pleine, ou tracé au trait seul (icônes, filets) : déplaçable de la même façon
+      const shape = ok && FILL.has(o.op), line = ok && (o.op === 'S' || o.op === 's');
+      if (shape || line) {
         const ord = ctx.ord++;
-        if (ctx.scan) ctx.shapes.push({ ord, segs, evenodd: o.op.endsWith('*'), fill: hexOf(gs.fill), stroked: /^[Bb]/.test(o.op) });
+        if (ctx.scan) { ctx.shapes.push(line ? { ord, segs, kind: 'stroke', closed: o.op === 's' } : { ord, segs, evenodd: o.op.endsWith('*'), fill: hexOf(gs.fill), stroked: /^[Bb]/.test(o.op) }); holds(ord); }
         else {
           const ed = ctx.edits[ord];
           // Forme placée sous une transformation et/ou dans une autre couleur, à la même place dans le dessin
@@ -131,7 +136,19 @@ function run(doc, bytes, res, ctm0, gs0, ctx, depth = 0) {
             for (const c of ed.copies || []) { changed = true; wrapped(c); }   // copies (Alt + glisser), juste après l'original
           }
         }
-      } else { pathOps.forEach(raw); raw(o); }
+      } else if (clip) {
+        // Nouvelle découpe. Si tout ce qu'elle contient se déplace d'un même mouvement (une icône dans sa zone),
+        // elle suit le mouvement : sinon l'élément déplacé sortirait de sa découpe et disparaîtrait.
+        if (o.op !== 'n') impure();
+        const cid = ctx.clipN++, X = !ctx.scan && ctx.clipX?.[cid];
+        if (ctx.scan) ctx.clipInfo[cid] = { items: [], impure: false };
+        if (X) {
+          const T = mul(mul(gs.ctm, X), inv(gs.ctm) || ID);
+          out.push(enc(T.map(fmt).join(' ') + ' cm\n')); pathOps.forEach(raw); raw(o); out.push(enc((inv(T) || ID).map(fmt).join(' ') + ' cm\n'));
+          changed = true;
+        } else { pathOps.forEach(raw); raw(o); }
+        gs = { ...gs, clips: [...gs.clips, cid] };
+      } else { if (o.op !== 'n') impure(); pathOps.forEach(raw); raw(o); }
       pathOps = []; segs = []; clip = false; continue;
     }
     if (pathOps.length) { pathOps.forEach(raw); pathOps = []; segs = []; clip = false; }
@@ -158,7 +175,7 @@ function run(doc, bytes, res, ctm0, gs0, ctx, depth = 0) {
       // Déplaçable si la position est sûre et que le texte ne sert pas de masque (modes de rendu 4 à 7)
       const ok = !!fi && !lost && !!ts.fs && !!ts.th && ts.tr < 4 && !!inv(gs.ctm);
       const ord = ctx.ord++;
-      if (ctx.scan) { if (ok && ink) ctx.shapes.push({ ord, kind: 'text', pts }); }
+      if (ctx.scan) { if (ok && ink) { ctx.shapes.push({ ord, kind: 'text', pts }); holds(ord); } else if (ink || !ok) impure(); }
       else {
         const ed = ctx.edits[ord], adv = t => `[${fmt(-t * 1000 / (ts.fs * ts.th))}] TJ`;
         // Texte écrit à part sous la transformation m ; ensuite la ligne d'origine reprend là où elle en était
@@ -208,8 +225,8 @@ function run(doc, bytes, res, ctm0, gs0, ctx, depth = 0) {
         const mt = x.dict.lookup(N('Matrix')), m = mt instanceof PDFArray ? mt.asArray().map(v => v.asNumber?.() ?? 0) : ID;
         const fres = x.dict.lookup(N('Resources')) || resD();
         let r;
-        try { r = run(doc, streamBytes(x), fres, mul(m.length === 6 ? m : ID, gs.ctm), { fill: gs.fill, ts: gs.ts }, ctx, depth + 1); }
-        catch (e) { console.warn('Formulaire ignoré', e); raw(o); continue; }
+        try { r = run(doc, streamBytes(x), fres, mul(m.length === 6 ? m : ID, gs.ctm), { fill: gs.fill, ts: gs.ts, clips: gs.clips }, ctx, depth + 1); }
+        catch (e) { console.warn('Formulaire ignoré', e); impure(); raw(o); continue; }
         if (!ctx.scan && r.changed) {
           const ns = doc.context.flateStream(r.bytes, {});
           for (const [k, v] of x.dict.entries()) if (!['Filter', 'DecodeParms', 'Length', 'Resources'].includes(k.decodeText())) ns.dict.set(k, v);
@@ -220,6 +237,7 @@ function run(doc, bytes, res, ctm0, gs0, ctx, depth = 0) {
         continue;
       }
     }
+    if (o.op === 'Do' || o.op === 'sh' || o.op === 'BI') impure();   // image, dégradé : la découpe n'est pas qu'à nous
     raw(o);
   }
   if (pathOps.length) pathOps.forEach(raw);
@@ -228,7 +246,7 @@ function run(doc, bytes, res, ctm0, gs0, ctx, depth = 0) {
 
 /* ---------- Géométrie pour l'interface ---------- */
 // Contours aplatis (courbes en segments) pour savoir si un point est dans la forme
-function polysOf(segs) {
+function polysOf(segs, min = 3) {
   const polys = []; let poly = null;
   for (const s of segs) {
     if (s[0] === 'M') { poly = [s[1]]; polys.push(poly); }
@@ -242,7 +260,16 @@ function polysOf(segs) {
       }
     }
   }
-  return polys.filter(p => p.length > 2);
+  return polys.filter(p => p.length >= min);
+}
+// Point à moins de tol d'un tracé (polylignes ouvertes ou fermées)
+function near(polys, [x, y], tol) {
+  for (const p of polys) for (let i = 1; i < p.length; i++) {
+    const [ax, ay] = p[i - 1], [bx, by] = p[i], dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy;
+    const t = L ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L)) : 0;
+    if (Math.hypot(ax + t * dx - x, ay + t * dy - y) <= tol) return true;
+  }
+  return false;
 }
 function inside(polys, [x, y], evenodd) {
   let wind = 0, cross = 0;
@@ -254,7 +281,7 @@ function inside(polys, [x, y], evenodd) {
 }
 
 function scan(doc, page) {
-  const ctx = { scan: true, ord: 0, shapes: [] };
+  const ctx = { scan: true, ord: 0, shapes: [], clipInfo: [], clipN: 0 };
   run(doc, pageContent(doc, page.node), page.node.Resources() || doc.context.obj({}), ID, { fill: { cs: 'G', v: [0] }, ts: TS0 }, ctx);
   return ctx.shapes.map(s => {
     if (s.kind === 'text') {   // texte : sa boîte suffit pour le désigner
@@ -262,18 +289,39 @@ function scan(doc, page) {
       const box = { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
       return { ord: s.ord, kind: 'text', box, polys: [[[box.x0, box.y0], [box.x1, box.y0], [box.x1, box.y1], [box.x0, box.y1]]], evenodd: false };
     }
-    const polys = polysOf(s.segs), pts = polys.flat();
+    const polys = polysOf(s.segs, s.kind === 'stroke' ? 2 : 3), pts = polys.flat();
     if (!pts.length) return null;
     const box = { x0: Math.min(...pts.map(p => p[0])), y0: Math.min(...pts.map(p => p[1])), x1: Math.max(...pts.map(p => p[0])), y1: Math.max(...pts.map(p => p[1])) };
     return { ...s, polys, box };
-  }).filter(s => s && s.box.x1 - s.box.x0 > 0.5 && s.box.y1 - s.box.y0 > 0.5);
+  }).filter(s => s && (s.kind === 'stroke' ? s.box.x1 - s.box.x0 > 0.5 || s.box.y1 - s.box.y0 > 0.5   // un filet peut être plat
+    : s.box.x1 - s.box.x0 > 0.5 && s.box.y1 - s.box.y0 > 0.5));
 }
 
+// Découpes à déplacer : celles dont tous les éléments ont le même mouvement (sans copie, rien d'autre dedans)
+function clipMoves(info, edits) {
+  const out = {}, same = (p, q) => p.every((x, i) => Math.abs(x - q[i]) < 1e-6);
+  info.forEach((c, cid) => {
+    if (!c || c.impure || !c.items.length) return;
+    let m = null;
+    for (const ord of c.items) {
+      const e = edits[ord];
+      if (e?.copies?.length) return;
+      if (e?.del) continue;
+      const em = e?.m || ID;
+      if (m && !same(m, em)) return;
+      m = em;
+    }
+    if (m && !same(m, ID)) out[cid] = m;
+  });
+  return out;
+}
 // Réécrit le contenu de la page avec les modifications ; ne touche à rien s'il n'y a rien à changer
 function apply(doc, page, edits) {
   if (!edits || !Object.keys(edits).length) return false;
-  const node = page.node, res = node.Resources() || doc.context.obj({});
-  const r = run(doc, pageContent(doc, node), res, ID, { fill: { cs: 'G', v: [0] }, ts: TS0 }, { scan: false, ord: 0, edits });
+  const node = page.node, res = node.Resources() || doc.context.obj({}), bytes = pageContent(doc, node);
+  const info = { scan: true, ord: 0, shapes: [], clipInfo: [], clipN: 0 };
+  run(doc, bytes, res, ID, { fill: { cs: 'G', v: [0] }, ts: TS0 }, info);
+  const r = run(doc, bytes, res, ID, { fill: { cs: 'G', v: [0] }, ts: TS0 }, { scan: false, ord: 0, edits, clipN: 0, clipX: clipMoves(info.clipInfo, edits) });
   if (!r.changed) return false;
   node.set(N('Contents'), doc.context.obj([doc.context.register(doc.context.flateStream(r.bytes))]));
   if (r.res !== res) node.set(N('Resources'), r.res);
@@ -285,5 +333,5 @@ function svgPath(segs, m = ID) {
   return segs.map(s => s[0] === 'Z' ? 'Z' : s[0] + s.slice(1).map(p => ap(m, p[0], p[1]).map(v => +v.toFixed(2)).join(' ')).join(' ')).join('');
 }
 
-return { scan, apply, inside, svgPath, mul, inv, ap };
+return { scan, apply, inside, near, svgPath, mul, inv, ap };
 })();

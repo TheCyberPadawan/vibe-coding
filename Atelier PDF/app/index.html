@@ -80,8 +80,8 @@ button,input,select,textarea{font:inherit;color:inherit}
 .swatch[aria-pressed="true"]{box-shadow:0 0 0 2px var(--accent)}
 .toggle[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
 
-main{display:grid;grid-template-columns:184px 1fr;min-height:0}
-#side{overflow:auto;border-right:1px solid var(--line);background:var(--panel);padding:12px 12px 40px}
+main{display:grid;grid-template-columns:204px 1fr;min-height:0}
+#side{overflow:auto;overflow-x:hidden;border-right:1px solid var(--line);background:var(--panel);padding:12px 12px 40px}
 #side .sidehead{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 10px;display:flex;justify-content:space-between}
 #thumbs{display:flex;flex-direction:column;gap:14px}
 .thumb{display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px;border-radius:8px;border:2px solid transparent;cursor:grab;position:relative}
@@ -187,6 +187,18 @@ dialog::backdrop{background:rgba(10,20,18,.45)}
 .menu button:hover:not(:disabled),.menu button:focus-visible{background:var(--hover)}
 .menu button:disabled{opacity:.45;cursor:default}
 .menu button[aria-checked="true"]{color:var(--accent);font-weight:600}
+.layer-row{display:flex;align-items:center;gap:2px;padding:3px 4px;border-radius:6px;cursor:pointer;border:1px solid transparent;font-size:12.5px}
+.layer-row:hover{background:var(--hover)}
+.layer-row[aria-current="true"]{border-color:var(--accent);background:var(--hover)}
+.layer-row.base{cursor:default;color:var(--muted);border-top:1px dashed var(--line);border-radius:0;margin-top:4px;padding-top:6px}
+.layer-row .btn.icon{width:24px;height:24px;padding:0;min-width:0}
+.layer-row .btn[aria-pressed="true"]{color:var(--accent)}
+.layer-row .lyr-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:2px}
+.layer-row .lyr-n{color:var(--muted);font-size:11px}
+.layer-row .lyr-move{display:flex}
+.layer-row .lyr-move .btn.icon{width:18px}
+.layer-actions{display:grid;gap:6px;margin:12px 0 8px}
+.layer-actions .btn{justify-content:flex-start;white-space:normal;text-align:left;height:auto;min-height:30px}
 .menu .kbd{margin-left:auto;padding-left:24px;font-size:12px;opacity:.6}
 .lockmark{display:none;cursor:pointer}
 body[data-tool="select"] .lockmark{display:inline;pointer-events:visiblePainted}
@@ -205,7 +217,7 @@ body .page svg.overlay .annot.locked{pointer-events:none;cursor:default}
 .tgroup .tool[aria-pressed="true"] + .caret{background:var(--accent-soft);color:var(--accent)}
 /* Barre latérale à onglets */
 .sidetabs{display:flex;gap:2px;margin:0 0 12px;border-bottom:1px solid var(--line)}
-.sidetabs button{flex:1;border:0;background:none;padding:6px 2px 8px;font-size:12px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap}
+.sidetabs button{flex:1 1 auto;min-width:0;border:0;background:none;padding:6px 1px 8px;font-size:11.5px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap}
 .sidetabs button[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
 .pane .empty{color:var(--muted);font-size:12px;line-height:1.5}
 .otree{list-style:none;margin:0;padding:0;font-size:12.5px}
@@ -271,7 +283,7 @@ body .page svg.overlay .annot.locked{pointer-events:none;cursor:default}
     <button class="btn fileact" id="btnOpen" title="Ouvrir un PDF ou des images (Ctrl+O)"><i data-icon="open"></i><span class="lbl">Ouvrir</span></button>
     <button class="btn fileact needdoc" id="btnAdd" title="Ajouter un autre PDF ou des images à la fin (fusion)"><i data-icon="merge"></i><span class="lbl">Fusionner</span></button>
     <button class="btn fileact needdoc" data-menu="mPages" aria-haspopup="menu" title="Insérer, extraire, diviser, recadrer des pages"><i data-icon="pages"></i><span class="lbl">Pages</span><i data-icon="caret"></i></button>
-    <button class="btn fileact needdoc" data-menu="mTools" aria-haspopup="menu" title="Grouper, verrouiller, en-tête, filigrane, OCR, protection, nettoyage, compression, export"><i data-icon="tools"></i><span class="lbl">Outils</span><i data-icon="caret"></i></button>
+    <button class="btn fileact needdoc" data-menu="mTools" aria-haspopup="menu" title="Grouper, verrouiller, ordre, calques, en-tête, filigrane, OCR, protection, nettoyage, compression, export"><i data-icon="tools"></i><span class="lbl">Outils</span><i data-icon="caret"></i></button>
     <span class="spacer"></span>
     <button class="btn icon needdoc" id="btnFind" title="Rechercher (Ctrl+F)" aria-label="Rechercher"><i data-icon="search"></i></button>
     <button class="btn icon needdoc" id="btnPrint" title="Imprimer (Ctrl+P)" aria-label="Imprimer"><i data-icon="print"></i></button>
@@ -295,10 +307,12 @@ body .page svg.overlay .annot.locked{pointer-events:none;cursor:default}
         <button role="tab" data-pane="thumbs" aria-selected="true">Pages <span id="pageCount"></span></button>
         <button role="tab" data-pane="outline" aria-selected="false">Signets</button>
         <button role="tab" data-pane="comments" aria-selected="false">Notes <span id="noteCount"></span></button>
+        <button role="tab" data-pane="layers" aria-selected="false">Calques</button>
       </div>
       <div id="thumbs" class="pane"></div>
       <div id="outline" class="pane" hidden></div>
       <div id="comments" class="pane" hidden></div>
+      <div id="layers" class="pane" hidden></div>
     </aside>
     <section id="workspace">
       <div id="findbar" hidden>
@@ -361,6 +375,12 @@ body .page svg.overlay .annot.locked{pointer-events:none;cursor:default}
   <button role="menuitem" id="btnUngroup">Dégrouper<span class="kbd">Ctrl+Maj+G</span></button>
   <button role="menuitem" id="btnLock">Verrouiller la sélection<span class="kbd">Ctrl+L</span></button>
   <button role="menuitem" id="btnUnlockAll">Tout déverrouiller sur cette page<span class="kbd">Ctrl+Maj+L</span></button>
+  <hr>
+  <button role="menuitem" id="btnFront">Premier plan<span class="kbd">Ctrl+Maj+↑</span></button>
+  <button role="menuitem" id="btnUp">Avancer<span class="kbd">Ctrl+↑</span></button>
+  <button role="menuitem" id="btnDown">Reculer<span class="kbd">Ctrl+↓</span></button>
+  <button role="menuitem" id="btnBack">Arrière-plan<span class="kbd">Ctrl+Maj+↓</span></button>
+  <button role="menuitem" id="btnLayers">Calques…</button>
   <hr>
   <button role="menuitem" id="btnHeader">En-tête, pied de page et numéros…</button>
   <button role="menuitem" id="btnWatermark">Filigrane…</button>

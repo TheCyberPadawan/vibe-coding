@@ -23,8 +23,10 @@ const ICONS = {
   trash:'<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
   group:'<rect x="3" y="3" width="10" height="8" rx="1"/><rect x="11" y="13" width="10" height="8" rx="1"/><path d="M8 11v4h3M16 13V9h-3"/>',
   ungroup:'<rect x="3" y="3" width="8" height="7" rx="1"/><rect x="13" y="14" width="8" height="7" rx="1"/><path d="M14 4h6v6M4 14v6h6" stroke-dasharray="2 2"/>',
-  lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
   unlock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>',
+  eye:'<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  eyeoff:'<path d="M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-3.2 4.1M6.6 6.6A17 17 0 0 0 2 12s3.5 7 10 7a9.6 9.6 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
+  layers:'<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
   rotr:'<path d="M20 12a8 8 0 1 1-2.3-5.6L20 9"/><path d="M20 4v5h-5"/>',
   rotl:'<path d="M4 12a8 8 0 1 0 2.3-5.6L4 9"/><path d="M4 4v5h5"/>',
   form:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h6M7 17h4"/>',
@@ -210,6 +212,7 @@ const S = {
   decor: {},                    // en-tête, pied de page, numéros, filigrane (appliqués à toutes les pages)
   meta: {},                     // titre, auteur, sujet, mots-clés
   protect: null,                // { user, owner, perms } : chiffrement à l'enregistrement
+  layers: [{ id: 'c1', name: 'Calque 1' }], curLayer: 'c1', pdfLocked: false,   // calques nommés (voir « Calques et ordre d'empilement »)
 };
 const V = new Map();   // id de page -> vue affichée
 let io = null, tio = null, ED = null, propsKey = '';
@@ -277,11 +280,11 @@ async function loadSource(bytes, name) {
     }
   }
   // Ajouts d'un précédent enregistrement par Atelier PDF : retirés de la page, ils redeviennent modifiables
-  let layers = null;
-  try { const l = await AtelierLayer.read(bytes); if (l) { bytes = l.bytes; layers = l.layers; } }
+  let layers = null, vmeta = null, docLayers = null;
+  try { const l = await AtelierLayer.read(bytes); if (l) { bytes = l.bytes; layers = l.layers.size ? l.layers : null; vmeta = l.vmeta; docLayers = l.docLayers; } }
   catch (e) { console.warn('Calque modifiable ignoré', e); }
   const pdf = await openPdfjs(bytes);
-  const src = { id: S.sources.length, name, bytes, pdf, pageCache: new Map(), security, outline: [], layers };
+  const src = { id: S.sources.length, name, bytes, pdf, pageCache: new Map(), security, outline: [], layers, vmeta, docLayers };
   try { src.outline = await loadOutline(pdf); } catch (e) { console.warn('Signets illisibles', e); }
   S.sources.push(src);
   return src;
@@ -363,6 +366,7 @@ async function imagesToPdfBytes(files) {
 function resetDoc() {
   S.sources = []; S.pages = []; S.undo = []; S.redo = []; S.form = {}; S.sel = null; S.vsel = null; S.dirty = false; S.cur = 0; propsKey = '';
   derived.forEach(d => d.pdf?.loadingTask?.destroy()); derived.clear();
+  S.layers = DEFAULT_LAYER(); S.curLayer = 'c1'; S.pdfLocked = false;
   S.find = { q: '', hits: [], cur: -1 }; S.decor = {}; S.meta = {}; S.protect = null; S.clean = null; S.diff = null; S.metaEdited = false;
 }
 
@@ -383,10 +387,17 @@ async function addFiles(fileList, replace, dir, at) {
     const added = [];
     for (const f of pdfs) {
       const src = await loadSource(new Uint8Array(await f.arrayBuffer()), f.name);
+      // Calques du fichier : ceux du document ouvert, ou ajoutés au-dessus de ceux du document en cours
+      if (src.docLayers) {
+        if (replace && !added.length) { S.layers = src.docLayers.layers; S.pdfLocked = src.docLayers.pdfLocked; }
+        else for (const L of src.docLayers.layers) if (!S.layers.some(x => x.id === L.id)) S.layers.push(L);
+        S.curLayer = S.layers[S.layers.length - 1].id; renderLayers();
+      }
       const own = [];
       for (let i = 0; i < src.pdf.numPages; i++) {
         const pg = newPage(src.id, i);
         pg.annots = (src.layers?.get(i) || []).map(a => a.type === 'text' && !FONTS[a.font] ? { ...a, font: 'Helvetica' } : a);
+        if (src.vmeta?.get(i)) pg.vpending = src.vmeta.get(i);   // groupes et verrous d'éléments du PDF, retrouvés plus tard
         own.push(pg); added.push(pg);
       }
       // Textes remplacés : leur police d'origine est recherchée dans Windows (sinon police de remplacement)
@@ -458,15 +469,15 @@ async function rebuild() {
       // Texte ou bloc de couleur du PDF sous la souris : Maj/Ctrl l'ajoute ou le retire de la sélection ;
       // sinon il est sélectionné (ou le groupe dont il fait partie) et on peut le faire glisser
       const sh = vHit(view, toPdf(e, view));
-      if (sh && extend) {   // Maj/Ctrl : un clic ajoute ou retire l'élément ; un glisser déplace la sélection (Maj : sur un axe)
-        const k = vKey(sh), had = S.vsel?.pid === p.id && S.vsel.ords.includes(k);
-        if (!had) toggleVsel(view, sh);
-        return groupMove(e, view, el, had ? () => toggleVsel(view, sh) : null);
+      if (sh && extend) {   // Maj/Ctrl : un clic ajoute ou retire l'élément (avec son groupe) ; un glisser déplace la sélection (Maj : sur un axe)
+        const who = { key: vKey(sh) }, had = curOrds(view).includes(who.key);
+        if (!had) toggleUnit(view, who);
+        return groupMove(e, view, el, had ? () => toggleUnit(view, who) : null);
       }
-      if (sh) {
-        const inGroup = S.vsel?.pid === p.id && S.vsel.ords.includes(vKey(sh)) && (S.vsel.ords.length > 1 || S.sel);
-        if (!inGroup) setVsel(view, sh);
-        return groupMove(e, view, el, inGroup ? () => setVsel(view, sh) : null);
+      if (sh) {   // l'élément, ou tout son groupe
+        const who = { key: vKey(sh) }, inSel = curOrds(view).includes(who.key), inGroup = inSel && selSize(view) > unitSize(view, who);
+        if (!inSel) selectUnit(view, who);
+        return groupMove(e, view, el, inGroup ? () => selectUnit(view, who) : null);
       }
       const keepV = extend && S.vsel?.pid === p.id ? S.vsel.ords : [];
       if (!extend) setSel(null);
@@ -508,7 +519,7 @@ async function rebuild() {
 // again : la page a changé (bloc de couleur modifié) — dessin dans un nouveau canevas, échangé une fois prêt
 async function renderView(v, again) {
   if (again ? !v.rendered : v.rendered) return; v.rendered = true;
-  if (!v.shapes) shapesOf(v.p).then(s => { v.shapes = s; });
+  if (!v.shapes) shapesOf(v.p).then(async s => { v.shapes = s; if (v.p.vpending) { await resolvePending(v.p); drawAnnots(v); } });
   const dpr = Math.min(window.devicePixelRatio || 1, 2), c = again ? document.createElement('canvas') : v.canvas;
   c.width = Math.floor(v.vp.width * dpr); c.height = Math.floor(v.vp.height * dpr);
   c.style.width = v.vp.width + 'px'; c.style.height = v.vp.height + 'px';
@@ -643,7 +654,7 @@ function roundRectPath(w, h, r) {
 const markLine = a => a.kind === 'underline' ? a.h * 0.14 : a.h * 0.5;   // hauteur du trait dans la boîte
 const markWidth = a => Math.max(0.8, a.h * 0.075);
 function annotNode(a, cls = 'annot') {
-  if (a.locked) cls += ' locked';   // on clique à travers un élément verrouillé
+  if (a.id && lockedA(a)) cls += ' locked';   // on clique à travers un élément verrouillé (ou d'un calque verrouillé)
   const g = svgEl('g', a.id ? { 'data-aid': a.id, class: cls } : { class: cls });
   const fr = frameOf(a);
   const t = svgEl('g', { transform: `translate(${fr.x} ${fr.y}) rotate(${fr.r})` }); g.append(t);
@@ -704,7 +715,9 @@ function drawAnnots(v) {
   v.g.replaceChildren();
   const i = S.pages.indexOf(v.p);
   for (const d of decorFor(v.p, i, S.pages.length, v.pg.view, v.rotation)) v.g.append(annotNode(d, 'decor'));
-  for (const a of v.p.annots) {
+  adopt(v.p);
+  for (const a of stacked(v.p.annots)) {
+    if (hiddenA(a)) continue;   // calque masqué
     const n = annotNode(a);
     if (ED && ED.a === a) n.setAttribute('visibility', 'hidden');
     v.g.append(n);
@@ -721,22 +734,23 @@ function drawAnnots(v) {
   });
   for (const h of S.diff || []) if (h.pid === v.p.id) v.g.append(svgEl('rect', { class: 'diff-add', x: 0, y: 0, width: h.w, height: h.h, transform: `translate(${h.x} ${h.y}) rotate(${h.r})` }));
   // Cadenas des éléments verrouillés (un par groupe), visible avec l'outil Sélection : un clic déverrouille
-  const locks = new Set();
-  for (const a of v.p.annots) {
-    if (!a.locked || locks.has(a.gid || a.id)) continue;
-    locks.add(a.gid || a.id);
-    const b = unionBox(groupMembers(v.p, a).filter(x => x.locked).map(annotBox)), s = 1 / v.vp.scale;
-    const m = svgEl('g', { class: 'lockmark', 'data-unlock': a.id, transform: `translate(${b.x1} ${b.y1}) scale(${s} ${-s})` });
+  const locks = new Map(), lockAt = (unit, box, id) => { const l = locks.get(unit); if (l) l.boxes.push(box); else locks.set(unit, { boxes: [box], id }); };
+  for (const a of v.p.annots) if (a.locked && !hiddenA(a)) lockAt(a.gid || '#' + a.id, annotBox(a), a.id);
+  for (const sh of v.p.vmeta ? vList(v) : []) { const k = vKey(sh), e = vmOf(v.p, k); if (e.locked) lockAt(e.gid || '@' + k, vBox(v.p, sh), 'v:' + k); }
+  for (const { boxes, id } of locks.values()) {
+    const b = unionBox(boxes), s = 1 / v.vp.scale;
+    const m = svgEl('g', { class: 'lockmark', 'data-unlock': id, transform: `translate(${b.x1} ${b.y1}) scale(${s} ${-s})` });
     const tt = svgEl('title'); tt.textContent = 'Verrouillé : cliquez pour déverrouiller'; m.append(tt);
     m.append(svgEl('rect', { class: 'bg', x: -15, y: 1, width: 14, height: 14, rx: 3 }), svgEl('path', { class: 'shackle', d: 'M-10.5 7.5V5.5a2.5 2.5 0 0 1 5 0v2' }),
       svgEl('rect', { class: 'body', x: -12, y: 7.5, width: 8, height: 5.5, rx: 1 }));
     v.g.append(m);
   }
   const sel = S.sel && S.sel.pid === v.p.id ? selAnnots() : [];
-  // Groupe sélectionné : un seul cadre et une poignée qui redimensionne tout le groupe
-  const grp = sel.length > 1 && !(ED && sel.includes(ED.a)) && !(CROP && sel.includes(CROP.a)) && S.vsel?.pid !== v.p.id && selGroup();
+  const ghost = new Map((v.vghost || []).map(g => [vKey(g.sh), g.m]));
+  // Groupe sélectionné (ajouts et/ou éléments du PDF) : un seul cadre et une poignée qui redimensionne tout le groupe
+  const cg = !(ED && sel.includes(ED.a)) && !(CROP && sel.includes(CROP.a)) ? curGroup() : null, grp = cg?.v === v ? cg : null;
   if (grp) {
-    const b = unionBox(grp.map(annotBox)), sg = svgEl('g', { class: 'selbox group' });
+    const b = unionBox([...grp.annots.map(annotBox), ...grp.items.map(sh => vBox(v.p, sh, ghost.get(vKey(sh))))]), sg = svgEl('g', { class: 'selbox group' });
     sg.append(svgEl('rect', { x: b.x0 - 3, y: b.y0 - 3, width: b.x1 - b.x0 + 6, height: b.y1 - b.y0 + 6, 'stroke-width': 1.5, 'stroke-dasharray': '8 3 2 3', 'vector-effect': 'non-scaling-stroke' }));
     sg.append(svgEl('circle', { class: 'handle', 'data-handle': 'g', cx: b.x1 + 3, cy: b.y0 - 3, r: 6 / v.vp.scale, 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke' }));
     v.g.append(sg);
@@ -754,7 +768,6 @@ function drawAnnots(v) {
     v.g.append(sg);
   }
   // Bloc de couleur du PDF : aperçu pendant le déplacement, cadre et poignée de la sélection
-  const ghost = new Map((v.vghost || []).map(g => [vKey(g.sh), g.m]));
   for (const { sh, m } of v.vghost || []) {
     const ed = edOf(v.p, sh);
     if (sh.kind === 'text') {   // aperçu : l'image du texte prise sur la page, à sa nouvelle place
@@ -763,10 +776,10 @@ function drawAnnots(v) {
       v.g.append(svgEl('rect', { class: 'vghost', x: b.x0, y: b.y0, width: b.x1 - b.x0, height: b.y1 - b.y0, fill: img ? 'none' : 'rgba(31,115,216,.15)', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' }));
       continue;
     }
-    v.g.append(svgEl('path', { class: 'vghost', d: AtelierVector.svgPath(sh.segs, m), 'fill-rule': sh.evenodd ? 'evenodd' : 'nonzero',
-      fill: ed?.fill || sh.fill || '#9aa5a1', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' }));
+    v.g.append(svgEl('path', sh.kind === 'stroke' ? { class: 'vghost', d: AtelierVector.svgPath(sh.segs, m), fill: 'none', 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke' }
+      : { class: 'vghost', d: AtelierVector.svgPath(sh.segs, m), 'fill-rule': sh.evenodd ? 'evenodd' : 'nonzero', fill: ed?.fill || sh.fill || '#9aa5a1', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' }));
   }
-  const vsel = S.vsel?.pid === v.p.id ? vList(v).filter(s => S.vsel.ords.includes(vKey(s))) : [];
+  const vsel = S.vsel?.pid === v.p.id && !grp ? vList(v).filter(s => S.vsel.ords.includes(vKey(s))) : [];
   for (const sh of vsel) {
     const b = vBox(v.p, sh, ghost.get(vKey(sh))), sg = svgEl('g', { class: 'selbox' });
     sg.append(svgEl('rect', { x: b.x0 - 2, y: b.y0 - 2, width: b.x1 - b.x0 + 4, height: b.y1 - b.y0 + 4, 'stroke-width': 1.5, 'stroke-dasharray': '5 4', 'vector-effect': 'non-scaling-stroke' }));
@@ -807,74 +820,128 @@ function selectMany(pid, ids, main = ids[ids.length - 1]) {
   redraw(pid); updateProps();
 }
 // Maj/Ctrl+clic : ajoute ou retire l'élément, ou tout son groupe
-function toggleSel(pid, aid) {
-  const p = S.pages.find(x => x.id === pid), a = p?.annots.find(x => x.id === aid), unit = a ? unitIds(p, a) : [aid];
-  if (!S.sel || S.sel.pid !== pid) return unit.length > 1 ? selectMany(pid, unit, aid) : setSel(pid, aid);
-  const ids = selIds();
-  if (ids.includes(aid)) selectMany(pid, ids.filter(x => !unit.includes(x)));
-  else selectMany(pid, [...ids.filter(x => !unit.includes(x)), ...unit.filter(x => x !== aid), aid], aid);
-}
+function toggleSel(pid, aid) { const v = V.get(pid); if (v) toggleUnit(v, { aid }); }
 
 /* ---------- Groupes et verrous ---------- */
-// Un groupe : les éléments d'une page qui portent le même a.gid. Ils se sélectionnent, se déplacent et se
-// redimensionnent ensemble ; chacun reste un élément ordinaire (enregistré, exporté et annulé comme avant).
-// Un élément verrouillé (a.locked) ne se sélectionne plus à la souris : on clique à travers lui.
+// Un groupe : les éléments d'une page qui portent le même identifiant de groupe, ajouts (a.gid) comme éléments
+// d'origine du PDF (p.vmeta[clé].gid). Ils se sélectionnent, se déplacent et se redimensionnent ensemble ;
+// chacun reste un élément ordinaire (enregistré, exporté et annulé comme avant).
+// Un élément verrouillé (a.locked, p.vmeta[clé].locked) ne se sélectionne plus à la souris : on clique à travers lui.
+const vmOf = (p, k) => p.vmeta?.[k] || {};
+function setVm(p, k, patch) {
+  const next = { ...(p.vmeta || {}) }, e = { ...(next[k] || {}) };
+  for (const [f, val] of Object.entries(patch)) if (val == null || val === false) delete e[f]; else e[f] = val;
+  if (Object.keys(e).length) next[k] = e; else delete next[k];
+  if (Object.keys(next).length) p.vmeta = next; else delete p.vmeta;
+}
 const groupMembers = (p, a) => a.gid ? p.annots.filter(x => x.gid === a.gid) : [a];
 const unitIds = (p, a) => groupMembers(p, a).map(x => x.id);
-// Unités de la sélection : un groupe compte pour un seul élément (aligner, répartir, grouper)
+// Membres d'un groupe sur une page affichée : ajouts et clés des éléments du PDF
+function gidMembers(v, gid) {
+  return { annots: v.p.annots.filter(a => a.gid === gid), ords: vList(v).map(vKey).filter(k => vmOf(v.p, k).gid === gid) };
+}
+// Unité d'un élément (who : { aid } pour un ajout, { key } pour un élément du PDF) : son groupe, ou lui seul
+function unitOf(v, who) {
+  const a = who.aid && v.p.annots.find(x => x.id === who.aid), gid = a ? a.gid : who.key != null ? vmOf(v.p, who.key).gid : null;
+  return gid ? { gid, ...gidMembers(v, gid) } : { gid: null, annots: a ? [a] : [], ords: who.key != null ? [who.key] : [] };
+}
+const curIds = v => S.sel?.pid === v.p.id ? selIds() : [];
+const curOrds = v => S.vsel?.pid === v.p.id ? S.vsel.ords : [];
+// Sélection d'une page : ajouts (S.sel) et éléments du PDF (S.vsel) ensemble
+function setSelection(v, ids, ords, main) {
+  const p = v.p;
+  for (const q of new Set([S.sel?.pid, S.vsel?.pid])) if (q && q !== p.id) { if (S.sel?.pid === q) S.sel = null; if (S.vsel?.pid === q) S.vsel = null; redraw(q); }
+  if (!ids.includes(main)) main = ids[ids.length - 1];
+  S.sel = ids.length ? { pid: p.id, aid: main, more: ids.filter(x => x !== main) } : null;
+  S.vsel = ords.length ? { pid: p.id, ords: [...ords] } : null;
+  drawAnnots(v); updateProps();
+}
+function selectUnit(v, who) { const u = unitOf(v, who); setSelection(v, u.annots.map(a => a.id), u.ords, who.aid); }
+function toggleUnit(v, who) {
+  const u = unitOf(v, who), ui = u.annots.map(a => a.id), ids = curIds(v), ords = curOrds(v);
+  const on = who.aid ? ids.includes(who.aid) : ords.includes(who.key);
+  const nIds = ids.filter(x => !ui.includes(x)), nOrds = ords.filter(x => !u.ords.includes(x));
+  if (!on) { nIds.push(...ui.filter(x => x !== who.aid)); if (who.aid) nIds.push(who.aid); nOrds.push(...u.ords); }
+  setSelection(v, nIds, nOrds, on ? undefined : who.aid);
+}
+// Taille de l'unité d'un élément et de la sélection de sa page (un clic sans déplacer réduit la sélection à l'unité)
+const unitSize = (v, who) => { const u = unitOf(v, who); return u.annots.length + u.ords.length; };
+const selSize = v => curIds(v).length + curOrds(v).length;
+// Sélection courante : sa page, ses ajouts et ses éléments du PDF
+function selMembers() {
+  const pid = S.sel?.pid || S.vsel?.pid, v = pid && V.get(pid);
+  if (!v) return null;
+  const annots = S.sel?.pid === pid ? selAnnots() : [], items = S.vsel?.pid === pid ? vList(v).filter(s => S.vsel.ords.includes(vKey(s))) : [];
+  return { v, p: v.p, annots, items, keys: items.map(vKey) };
+}
+// Nombre d'unités : un groupe compte pour un seul élément
+const unitCount = m => new Set([...m.annots.map(a => a.gid || '#' + a.id), ...m.keys.map(k => vmOf(m.p, k).gid || '@' + k)]).size;
+// Unités des ajouts sélectionnés (aligner, répartir)
 function selUnits(list = selAnnots()) {
   const m = new Map();
   for (const a of list) { const k = a.gid || '#' + a.id; if (!m.has(k)) m.set(k, []); m.get(k).push(a); }
   return [...m.values()];
 }
 // La sélection est exactement un groupe : tous ses membres et rien d'autre
-function selGroup() {
-  const list = selAnnots(); if (list.length < 2 || !list[0].gid) return null;
-  const p = S.pages.find(x => x.id === S.sel.pid);
-  return list.every(a => a.gid === list[0].gid) && groupMembers(p, list[0]).length === list.length ? list : null;
+function curGroup() {
+  const m = selMembers(); if (!m || m.annots.length + m.items.length < 2) return null;
+  const gids = new Set([...m.annots.map(a => a.gid), ...m.keys.map(k => vmOf(m.p, k).gid)]);
+  const gid = gids.size === 1 ? [...gids][0] : null; if (!gid) return null;
+  const g = gidMembers(m.v, gid);
+  return g.annots.length === m.annots.length && g.ords.length === m.items.length ? { gid, ...m } : null;
 }
+const selGroup = curGroup;
 // Copies : leurs groupes reçoivent de nouveaux identifiants (sinon la copie rejoindrait le groupe d'origine)
-function freshGids(list) {
-  const m = new Map();
+function freshGids(list, m = new Map()) {
   for (const a of list) if (a.gid) { if (!m.has(a.gid)) m.set(a.gid, uid()); a.gid = m.get(a.gid); }
   return list;
 }
 // Un groupe réduit à un seul élément (les autres supprimés) n'en est plus un
-function pruneGroups(p) {
-  const n = new Map(); p.annots.forEach(a => a.gid && n.set(a.gid, (n.get(a.gid) || 0) + 1));
+function pruneGroups(p, v = V.get(p.id)) {
+  const n = new Map(), count = g => g && n.set(g, (n.get(g) || 0) + 1);
+  const live = v?.shapes ? new Set(vList(v).map(vKey)) : null;
+  for (const k of Object.keys(p.vmeta || {})) if (live && !live.has(k)) setVm(p, k, { gid: null, locked: null });
+  p.annots.forEach(a => count(a.gid));
+  Object.values(p.vmeta || {}).forEach(e => count(e.gid));
   p.annots.forEach(a => { if (a.gid && n.get(a.gid) < 2) delete a.gid; });
+  for (const k of Object.keys(p.vmeta || {})) { const g = vmOf(p, k).gid; if (g && n.get(g) < 2) setVm(p, k, { gid: null }); }
 }
 function groupSel() {
-  const list = selAnnots();
-  if (selUnits(list).length < 2) return toast(list.length > 1 ? 'Ces éléments forment déjà un groupe.'
-    : S.vsel ? 'Seuls les éléments ajoutés avec Atelier PDF peuvent être groupés.' : 'Sélectionnez au moins deux éléments (Maj+clic ou cadre tiré dans le vide) pour les grouper.');
-  snapshot(); const gid = uid(); list.forEach(a => { a.gid = gid; });   // un groupe dans un groupe : tout est fondu en un seul
-  propsKey = ''; redraw(S.sel.pid); updateProps();
-  toast(`${list.length} éléments groupés. Ctrl+Maj+G pour dégrouper.`, 2500);
+  const m = selMembers(), n = m ? m.annots.length + m.items.length : 0;
+  if (!m || unitCount(m) < 2) return toast(n > 1 ? 'Ces éléments forment déjà un groupe.' : 'Sélectionnez au moins deux éléments (Maj+clic ou cadre tiré dans le vide) pour les grouper.');
+  snapshot(); const gid = uid();   // un groupe dans un groupe : tout est fondu en un seul
+  m.annots.forEach(a => { a.gid = gid; }); m.keys.forEach(k => setVm(m.p, k, { gid }));
+  propsKey = ''; drawAnnots(m.v); updateProps();
+  toast(`${n} éléments groupés. Ctrl+Maj+G pour dégrouper.`, 2500);
 }
 function ungroupSel() {
-  const list = selAnnots().filter(a => a.gid); if (!list.length) return toast('Aucun groupe sélectionné.');
-  snapshot(); list.forEach(a => { delete a.gid; });
-  propsKey = ''; redraw(S.sel.pid); updateProps();
+  const m = selMembers(), list = m ? m.annots.filter(a => a.gid) : [], keys = m ? m.keys.filter(k => vmOf(m.p, k).gid) : [];
+  if (!list.length && !keys.length) return toast('Aucun groupe sélectionné.');
+  snapshot(); list.forEach(a => { delete a.gid; }); keys.forEach(k => setVm(m.p, k, { gid: null }));
+  propsKey = ''; drawAnnots(m.v); updateProps();
   toast('Groupe défait : chaque élément se sélectionne de nouveau seul.', 2500);
 }
 function lockSel() {
-  const list = selAnnots(); if (!list.length) return toast("Sélectionnez d'abord l'élément à verrouiller.");
-  snapshot(); list.forEach(a => { a.locked = true; });
-  const pid = S.sel.pid; S.sel = null; redraw(pid); updateProps();
-  toast(`${selUnits(list).length > 1 ? 'Verrouillés' : 'Verrouillé'} : ne se sélectionne plus au clic. Pour déverrouiller : cadenas, clic droit ou Ctrl+Maj+L.`, 4500);
+  const m = selMembers(); if (!m || !(m.annots.length + m.items.length)) return toast("Sélectionnez d'abord l'élément à verrouiller.");
+  const n = unitCount(m);
+  snapshot(); m.annots.forEach(a => { a.locked = true; }); m.keys.forEach(k => setVm(m.p, k, { locked: true }));
+  S.sel = null; S.vsel = null; propsKey = ''; drawAnnots(m.v); updateProps();
+  toast(`${n > 1 ? 'Verrouillés' : 'Verrouillé'} : ne se sélectionne plus au clic. Pour déverrouiller : cadenas, clic droit ou Ctrl+Maj+L.`, 4500);
 }
-function unlockAnnots(p, list) {
-  if (!list.length) return;
-  snapshot(); list.forEach(a => { delete a.locked; });
+// Éléments verrouillés d'une page affichée
+const lockedOf = v => ({ annots: v.p.annots.filter(a => a.locked), keys: vList(v).map(vKey).filter(k => vmOf(v.p, k).locked) });
+function unlockUnits(v, annots, keys) {
+  if (!annots.length && !keys.length) return;
+  snapshot(); annots.forEach(a => { delete a.locked; }); keys.forEach(k => setVm(v.p, k, { locked: null }));
   if (S.tool !== 'select') setTool('select');
-  selectMany(p.id, list.map(a => a.id));
+  setSelection(v, annots.map(a => a.id), keys);
 }
 function unlockAll(p = S.pages[S.cur]) {
-  const list = p ? p.annots.filter(a => a.locked) : [];
-  if (!list.length) return toast('Aucun élément verrouillé sur cette page.');
-  unlockAnnots(p, list);
-  toast(`${selUnits(list).length > 1 ? `${selUnits(list).length} éléments déverrouillés` : 'Élément déverrouillé'} (sélectionnés).`, 2500);
+  const v = p && V.get(p.id), L = v ? lockedOf(v) : { annots: [], keys: [] };
+  if (!L.annots.length && !L.keys.length) return toast('Aucun élément verrouillé sur cette page.');
+  const n = unitCount({ p, annots: L.annots, keys: L.keys });
+  unlockUnits(v, L.annots, L.keys);
+  toast(`${n > 1 ? `${n} éléments déverrouillés` : 'Élément déverrouillé'} (sélectionnés).`, 2500);
 }
 // Poignée d'un groupe : tout est agrandi ou réduit dans les mêmes proportions, coin haut gauche fixe
 function scaleAnnot(a, o, k, ax, ay) {
@@ -886,47 +953,215 @@ function scaleAnnot(a, o, k, ax, ay) {
   if (o.type === 'text') a.size = r2(Math.min(500, Math.max(1, o.size * k)));   // interligne et espacement suivent (relatifs à la taille)
   if (o.type === 'shape') { a.width = w(o.width); if (o.rx) a.rx = r2(o.rx * k); }
 }
+// Les éléments du PDF du groupe sont mis à l'échelle par leur transformation (aperçu pendant le geste)
 function groupResize(e, v) {
-  const list = selAnnots(); if (list.length < 2) return;
-  const origs = list.map(clone), b = unionBox(origs.map(annotBox)), bw = Math.max(1, b.x1 - b.x0), bh = Math.max(1, b.y1 - b.y0);
+  const cg = curGroup(); if (!cg || cg.v !== v) return;
+  const p = v.p, list = cg.annots, items = cg.items, origs = list.map(clone), m0 = items.map(sh => mOf(p, sh));
+  const b = unionBox([...origs.map(annotBox), ...items.map(sh => vBox(p, sh))]), bw = Math.max(1, b.x1 - b.x0), bh = Math.max(1, b.y1 - b.y0);
   const ax = b.x0, ay = b.y1, kmin = 8 / Math.max(bw, bh), start = toPdf(e, v), snap = serialize();
   let moved = false;
   capture(v, e, ev => {
     const P = toPdf(ev, v);
-    if (!moved) { if (Math.hypot(P[0] - start[0], P[1] - start[1]) * v.vp.scale < 2) return; pushSnap(snap); moved = true; }
+    if (!moved) {
+      if (Math.hypot(P[0] - start[0], P[1] - start[1]) * v.vp.scale < 2) return;
+      pushSnap(snap); moved = true; if (items.length) v.vcrops = textCrops(v, items);
+    }
     // Projection du pointeur sur la diagonale du cadre : un seul facteur pour les deux sens
     const k = Math.max(kmin, ((P[0] - ax) * bw + (ay - P[1]) * bh) / (bw * bw + bh * bh));
     list.forEach((a, i) => scaleAnnot(a, origs[i], k, ax, ay));
+    if (items.length) { const sc = [k, 0, 0, k, ax - ax * k, ay - ay * k]; v.vghost = items.map((sh, i) => ({ sh, m: AtelierVector.mul(m0[i], sc) })); }
     drawAnnots(v);
-  }, () => { if (moved) { propsKey = ''; updateProps(); } });
+  }, () => {
+    if (!moved) return;
+    if (items.length) { let next = p.vedits; for (const g of v.vghost) next = withEdit(next, g.sh, { m: round4(g.m) }); p.vedits = next; refreshView(v); }
+    propsKey = ''; updateProps();
+  });
 }
 // Clic droit sur la page : grouper, dégrouper, verrouiller la sélection ; déverrouiller ce qui est sous la souris
 function pageMenu(e, v) {
   if (e.target.closest('textarea, .forms > *')) return;
   e.preventDefault(); commitEditor();
-  const p = v.p, P = toPdf(e, v), hit = hitAnnot(e, v);
-  if (hit && !(S.sel?.pid === p.id && selIds().includes(hit.id))) { if (S.tool !== 'select') setTool('select'); selectMany(p.id, unitIds(p, hit), hit.id); }
-  const under = p.annots.filter(a => { if (!a.locked) return false; const b = annotBox(a); return P[0] >= b.x0 && P[0] <= b.x1 && P[1] >= b.y0 && P[1] <= b.y1; }).pop();
-  const sel = S.sel?.pid === p.id ? selAnnots() : [], units = selUnits(sel), items = [];
-  if (sel.length) {
-    if (units.length > 1) items.push(['group', 'Grouper', 'Ctrl+G', groupSel]);
-    if (units.some(u => u.length > 1)) items.push(['ungroup', 'Dégrouper', 'Ctrl+Maj+G', ungroupSel]);
-    items.push(['lock', units.length > 1 ? 'Verrouiller la sélection' : 'Verrouiller', 'Ctrl+L', lockSel]);
+  const p = v.p, P = toPdf(e, v), hit = hitAnnot(e, v), sh = !hit ? vHit(v, P) : null;
+  if (hit || sh) {   // clic droit sur un élément non sélectionné : il est sélectionné (avec son groupe)
+    const who = hit ? { aid: hit.id } : { key: vKey(sh) };
+    if (!(hit ? curIds(v).includes(hit.id) : curOrds(v).includes(who.key))) { if (S.tool !== 'select') setTool('select'); selectUnit(v, who); }
   }
-  if (under) {
-    const m = groupMembers(p, under);
-    items.push(['unlock', m.length > 1 ? 'Déverrouiller ce groupe' : 'Déverrouiller cet élément', '', () => { unlockAnnots(p, m); toast('Déverrouillé.', 1500); }]);
+  const inBox = b => P[0] >= b.x0 && P[0] <= b.x1 && P[1] >= b.y0 && P[1] <= b.y1;
+  const la = p.annots.filter(a => a.locked && inBox(annotBox(a))).pop();
+  const lv = la ? null : vHit(v, P, true);   // même règle de saisie qu'un clic
+  const m = selMembers(), items = [];
+  if (m && m.v === v && m.annots.length + m.items.length) {
+    const n = unitCount(m);
+    if (n > 1) items.push(['group', 'Grouper', 'Ctrl+G', groupSel]);
+    if (m.annots.some(a => a.gid) || m.keys.some(k => vmOf(p, k).gid)) items.push(['ungroup', 'Dégrouper', 'Ctrl+Maj+G', ungroupSel]);
+    items.push(['lock', n > 1 ? 'Verrouiller la sélection' : 'Verrouiller', 'Ctrl+L', lockSel]);
+    if (m.annots.length) {   // ordre d'empilement et calque des ajouts
+      items.push(null, ...RESTACK.map(([k, lbl, key]) => [k === 'front' || k === 'up' ? 'up' : 'down', lbl, key, () => restack(k)]));
+      if (S.layers.length > 1) items.push(null, ...[...S.layers].reverse().filter(L => !m.annots.every(a => a.layer === L.id)).map(L => ['layers', `Vers le calque « ${L.name} »`, '', () => moveToLayer(L.id)]));
+    }
   }
-  if (p.annots.some(a => a.locked)) items.push(['unlock', 'Tout déverrouiller sur la page', 'Ctrl+Maj+L', () => unlockAll(p)]);
+  if ((la || lv) && items.length) items.push(null);
+  if (la || lv) {
+    const u = unitOf(v, la ? { aid: la.id } : { key: vKey(lv) });
+    items.push(['unlock', u.annots.length + u.ords.length > 1 ? 'Déverrouiller ce groupe' : 'Déverrouiller cet élément', '', () => { unlockUnits(v, u.annots, u.ords); toast('Déverrouillé.', 1500); }]);
+  }
+  const L = lockedOf(v);
+  if (L.annots.length || L.keys.length) items.push(['unlock', 'Tout déverrouiller sur la page', 'Ctrl+Maj+L', () => unlockAll(p)]);
   if (!items.length) return;
   const menu = $('#mCtx');
-  menu.innerHTML = items.map(([ic, lbl, key], i) => `<button role="menuitem" data-ctx="${i}">${icon(ic)}${escHtml(lbl)}${key ? `<span class="kbd">${key}</span>` : ''}</button>`).join('');
+  while (items[items.length - 1] === null) items.pop();
+  menu.innerHTML = items.map((it, i) => !it ? '<hr>' : `<button role="menuitem" data-ctx="${i}">${icon(it[0])}${escHtml(it[1])}${it[2] ? `<span class="kbd">${it[2]}</span>` : ''}</button>`).join('');
   menu.querySelectorAll('[data-ctx]').forEach(b => b.addEventListener('click', () => items[+b.dataset.ctx][3]()));
   closeMenu(); menu.hidden = false;
   menu.style.left = Math.min(e.clientX, innerWidth - menu.offsetWidth - 8) + 'px';
   menu.style.top = Math.min(e.clientY, innerHeight - menu.offsetHeight - 8) + 'px';
   openMenu = menu; menu.querySelector('button')?.focus();
 }
+// Groupes et verrous des éléments du PDF à l'enregistrement : chacun est décrit par son genre et sa boîte
+// sur la page enregistrée, puis retrouvé à la réouverture (les numéros d'ordre changent quand la page est réécrite)
+async function vitemsOf(p) {
+  if (p.vpending) await resolvePending(p);
+  if (!p.vmeta) return [];
+  const shapes = await shapesOf(p), out = [];
+  for (const sh of vListOf(p, shapes)) {
+    const e = vmOf(p, vKey(sh)); if (!e.gid && !e.locked) continue;
+    const b = vBox(p, sh);
+    out.push({ k: sh.kind === 'text' || sh.kind === 'stroke' ? sh.kind : 'fill', b: [b.x0, b.y0, b.x1, b.y1].map(x => +x.toFixed(2)), ...(e.gid ? { gid: e.gid } : {}), ...(e.locked ? { locked: true } : {}) });
+  }
+  return out;
+}
+async function resolvePending(p) {
+  const pend = p.vpending; if (!pend) return;
+  delete p.vpending;
+  const shapes = await shapesOf(p), used = new Set();
+  for (const it of pend) {
+    let best = null, bd = 1;   // à moins d'un point près
+    for (const sh of shapes) {
+      if (used.has(sh.ord) || (sh.kind === 'text' || sh.kind === 'stroke' ? sh.kind : 'fill') !== it.k) continue;
+      const d = Math.max(Math.abs(sh.box.x0 - it.b[0]), Math.abs(sh.box.y0 - it.b[1]), Math.abs(sh.box.x1 - it.b[2]), Math.abs(sh.box.y1 - it.b[3]));
+      if (d < bd) { bd = d; best = sh; }
+    }
+    if (best) { used.add(best.ord); setVm(p, String(best.ord), { gid: it.gid, locked: it.locked }); }
+  }
+}
+/* ---------- Calques et ordre d'empilement ---------- */
+// S.layers : calques nommés du document, du dessous vers le dessus ; chaque ajout porte a.layer. Les ajouts se dessinent
+// calque par calque, et dans un calque dans l'ordre de p.annots (l'ordre d'empilement). Un calque masqué n'est ni
+// affiché ni dessiné dans le PDF (ses éléments restent dans la description, pour les retrouver) ; un calque
+// verrouillé ne se sélectionne plus. Le contenu d'origine du PDF est toujours dessous ; S.pdfLocked le verrouille.
+const DEFAULT_LAYER = () => [{ id: 'c1', name: 'Calque 1' }];
+const layerIdx = id => { const i = S.layers.findIndex(l => l.id === id); return i < 0 ? 0 : i; };
+const layerOf = a => S.layers[layerIdx(a.layer)];
+const lockedA = a => !!(a.locked || layerOf(a)?.locked);
+const hiddenA = a => !isRedact(a) && !!layerOf(a)?.hidden;   // une zone à caviarder reste toujours visible
+// Ordre de dessin : calque par calque, puis ordre de la page
+const stacked = annots => annots.map((a, k) => [a, k]).sort((x, y) => layerIdx(x[0].layer) - layerIdx(y[0].layer) || x[1] - y[1]).map(x => x[0]);
+// Un nouvel ajout (ou venu d'un autre document) entre dans le calque actif
+function adopt(p) { for (const a of p.annots) if (!a.layer || !S.layers.some(l => l.id === a.layer)) a.layer = S.curLayer; }
+const customLayers = () => S.layers.length > 1 || S.layers[0].name !== 'Calque 1' || S.layers.some(l => l.hidden || l.locked) || S.pdfLocked;
+
+// Premier plan / avancer / reculer / arrière-plan : la sélection (groupes compris) garde son ordre interne.
+// Avancer et reculer passent l'élément le plus proche qui la chevauche, dans le même calque.
+function restack(how) {
+  const m = selMembers();
+  if (!m || !m.annots.length) return toast(m?.items.length ? "Le contenu d'origine du PDF reste toujours sous les ajouts : l'ordre ne change que pour les ajouts." : "Sélectionnez d'abord un élément.");
+  const p = m.p, sel = new Set(m.annots), mine = p.annots.filter(a => sel.has(a)), rest = p.annots.filter(a => !sel.has(a));
+  let next;
+  if (how === 'front') next = [...rest, ...mine];
+  else if (how === 'back') next = [...mine, ...rest];
+  else {
+    const order = stacked(p.annots), U = unionBox(mine.map(annotBox)), pos = order.map((a, k) => sel.has(a) ? k : -1).filter(k => k >= 0);
+    const edge = how === 'up' ? Math.max(...pos) : Math.min(...pos), lay = order[edge].layer;
+    const cands = (how === 'up' ? order.slice(edge + 1) : order.slice(0, edge).reverse()).filter(a => !sel.has(a) && a.layer === lay && !hiddenA(a) && hits(annotBox(a), U));
+    if (!cands.length) return toast((how === 'up' ? 'Déjà au-dessus de ce qui le chevauche' : 'Déjà en dessous de ce qui le chevauche') + layerHint(), 3000);
+    const at = rest.indexOf(cands[0]);
+    next = how === 'up' ? [...rest.slice(0, at + 1), ...mine, ...rest.slice(at + 1)] : [...rest.slice(0, at), ...mine, ...rest.slice(at)];
+  }
+  if (next.every((a, k) => a === p.annots[k])) return toast((how === 'front' ? 'Déjà au premier plan' : "Déjà à l'arrière-plan") + layerHint(), 3000);
+  snapshot(); p.annots = next; drawAnnots(m.v);
+}
+// L'ordre ne vaut qu'à l'intérieur d'un calque : pour passer devant ou derrière un autre calque, on change de calque
+const layerHint = () => S.layers.length > 1 ? ' de son calque. Pour passer devant ou derrière un autre calque : clic droit › Vers le calque…' : '.';
+const RESTACK = [['front', 'Premier plan', 'Ctrl+Maj+↑'], ['up', 'Avancer', 'Ctrl+↑'], ['down', 'Reculer', 'Ctrl+↓'], ['back', 'Arrière-plan', 'Ctrl+Maj+↓']];
+
+// Déplacer les ajouts sélectionnés vers un calque
+function moveToLayer(id) {
+  const m = selMembers(), L = S.layers.find(l => l.id === id); if (!L) return;
+  if (!m || !m.annots.length) return toast(m?.items.length ? "Le contenu d'origine du PDF ne change pas de calque." : "Sélectionnez d'abord un élément.");
+  snapshot(); m.annots.forEach(a => { a.layer = id; });
+  if (L.hidden || L.locked) { S.sel = null; S.vsel = null; }
+  propsKey = ''; drawAnnots(m.v); updateProps(); renderLayers();
+  toast(`${m.annots.length > 1 ? `${m.annots.length} éléments placés` : 'Placé'} sur « ${L.name} »${L.hidden ? ' (masqué)' : L.locked ? ' (verrouillé)' : ''}.`, 2500);
+}
+function layerChanged() { if (S.sel && S.sel.pid && selAnnots().some(a => lockedA(a) || hiddenA(a))) { S.sel = null; S.vsel = null; } redrawAll(); propsKey = ''; updateProps(); renderLayers(); }
+function addLayer() {
+  snapshot();
+  let n = S.layers.length + 1; while (S.layers.some(l => l.name === `Calque ${n}`)) n++;
+  const L = { id: uid(), name: `Calque ${n}` };
+  S.layers.push(L); S.curLayer = L.id; layerChanged();
+  toast(`« ${L.name} » créé au-dessus des autres : les nouveaux ajouts y seront placés.`, 3000);
+}
+async function renameLayer(id) {
+  const L = S.layers.find(l => l.id === id); if (!L) return;
+  const d = await ask({ title: 'Renommer le calque', ok: 'Renommer', html: `<label>Nom <input name="name" maxlength="60" value="${escHtml(L.name)}"></label>`,
+    validate: x => x.name.trim() ? null : 'Donnez un nom au calque.' });
+  if (!d || d.name.trim() === L.name) return;
+  snapshot(); L.name = d.name.trim(); layerChanged();
+}
+function moveLayer(id, dir) {
+  const i = S.layers.findIndex(l => l.id === id), j = i + dir; if (i < 0 || j < 0 || j >= S.layers.length) return;
+  snapshot(); [S.layers[i], S.layers[j]] = [S.layers[j], S.layers[i]]; layerChanged();
+}
+function toggleLayer(id, k) {
+  if (id === 'pdf') { snapshot(); S.pdfLocked = !S.pdfLocked; if (S.pdfLocked) S.vsel = null; return layerChanged(); }
+  const L = S.layers.find(l => l.id === id); if (!L) return;
+  snapshot(); if (L[k]) delete L[k]; else L[k] = true; layerChanged();
+}
+// Supprimer un calque : ses éléments rejoignent le calque du dessous (ou du dessus s'il était tout en bas)
+function deleteLayer(id) {
+  const i = S.layers.findIndex(l => l.id === id); if (i < 0) return;
+  if (S.layers.length === 1) return toast('Un document garde toujours au moins un calque.');
+  const to = S.layers[i > 0 ? i - 1 : 1], n = S.pages.reduce((s, p) => s + p.annots.filter(a => a.layer === id).length, 0);
+  snapshot();
+  S.pages.forEach(p => p.annots.forEach(a => { if (a.layer === id) a.layer = to.id; }));
+  S.layers.splice(i, 1); if (S.curLayer === id) S.curLayer = to.id;
+  layerChanged();
+  toast(`Calque supprimé${n ? ` : ${n} élément${n > 1 ? 's' : ''} déplacé${n > 1 ? 's' : ''} sur « ${to.name} »` : ''}.`, 3000);
+}
+function renderLayers() {
+  const box = $('#layers'); if (!box || box.hidden) return;
+  const count = id => S.pages.reduce((s, p) => s + p.annots.filter(a => (a.layer || S.layers[0].id) === id).length, 0);
+  const row = (L, k) => `<div class="layer-row" data-layer="${L.id}" aria-current="${L.id === S.curLayer}" title="Cliquez pour en faire le calque actif (les nouveaux ajouts y vont) ; double-clic pour renommer">
+      <button class="btn icon" data-lyr="hidden" aria-pressed="${!!L.hidden}" title="${L.hidden ? 'Afficher' : 'Masquer (ni affiché, ni imprimé)'}">${icon(L.hidden ? 'eyeoff' : 'eye')}</button>
+      <button class="btn icon" data-lyr="locked" aria-pressed="${!!L.locked}" title="${L.locked ? 'Déverrouiller' : 'Verrouiller (ne se sélectionne plus)'}">${icon(L.locked ? 'lock' : 'unlock')}</button>
+      <span class="lyr-name">${escHtml(L.name)}</span><span class="lyr-n">${count(L.id) || ''}</span>
+      <span class="lyr-move"><button class="btn icon" data-lyr="up" title="Monter le calque" ${k === S.layers.length - 1 ? 'disabled' : ''}>${icon('up')}</button><button class="btn icon" data-lyr="down" title="Descendre le calque" ${k === 0 ? 'disabled' : ''}>${icon('down')}</button></span>
+    </div>`;
+  const hasSel = !!(S.sel && selAnnots().length);
+  box.innerHTML = [...S.layers].map((L, k) => [L, k]).reverse().map(([L, k]) => row(L, k)).join('')
+    + `<div class="layer-row base" data-layer="pdf" title="Contenu d'origine du PDF : toujours sous les calques">
+      <span class="btn icon" aria-hidden="true"></span>
+      <button class="btn icon" data-lyr="locked" aria-pressed="${!!S.pdfLocked}" title="${S.pdfLocked ? 'Déverrouiller' : 'Verrouiller : textes et blocs du PDF ne se sélectionnent plus'}">${icon(S.pdfLocked ? 'lock' : 'unlock')}</button>
+      <span class="lyr-name">Contenu du PDF</span></div>`
+    + `<div class="layer-actions">
+      <button class="btn" data-lyract="add">${icon('plus')}Nouveau calque</button>
+      <button class="btn" data-lyract="move" ${hasSel ? '' : 'disabled'} title="Placer les éléments sélectionnés sur le calque actif (encadré)">${icon('layers')}Y placer la sélection</button>
+      <button class="btn" data-lyract="rename">Renommer</button>
+      <button class="btn danger" data-lyract="del" ${S.layers.length > 1 ? '' : 'disabled'}>${icon('trash')}Supprimer</button></div>`
+    + `<p class="empty">Le calque du haut se dessine par-dessus les autres. Ordre dans un calque : clic droit › Premier plan, Avancer, Reculer, Arrière-plan.</p>`;
+}
+$('#layers').addEventListener('click', e => {
+  const act = e.target.closest('[data-lyract]')?.dataset.lyract;
+  if (act === 'add') return addLayer();
+  if (act === 'move') return moveToLayer(S.curLayer);
+  if (act === 'rename') return renameLayer(S.curLayer);
+  if (act === 'del') return deleteLayer(S.curLayer);
+  const r = e.target.closest('.layer-row'); if (!r) return;
+  const b = e.target.closest('[data-lyr]'), id = r.dataset.layer;
+  if (b) { const k = b.dataset.lyr; return k === 'up' ? moveLayer(id, 1) : k === 'down' ? moveLayer(id, -1) : toggleLayer(id, k); }
+  if (id !== 'pdf' && S.curLayer !== id) { S.curLayer = id; renderLayers(); }
+});
+$('#layers').addEventListener('dblclick', e => { const r = e.target.closest('.layer-row'); if (r && r.dataset.layer !== 'pdf' && !e.target.closest('[data-lyr]')) renameLayer(r.dataset.layer); });
 function setTool(t) {
   commitEditor();
   S.tool = t; document.body.dataset.tool = t;
@@ -946,13 +1181,15 @@ const groupOf = a => a.type === 'text' ? 'text' : a.type === 'ink' ? 'ink' : a.t
   : a.type === 'shape' || a.type === 'line' ? 'shape' : a.type === 'note' ? 'note' : a.type === 'link' ? 'link' : null;
 
 /* ---------- Historique ---------- */
-const serialize = () => JSON.stringify({ p: S.pages, d: S.decor });
+const serialize = () => JSON.stringify({ p: S.pages, d: S.decor, l: S.layers, c: S.curLayer, pl: S.pdfLocked });
 const structSig = pages => pages.map(p => `${p.id}:${p.src}:${p.idx}:${p.rot}`).join('|');
 function snapshot() { S.undo.push(serialize()); if (S.undo.length > 100) S.undo.shift(); S.redo = []; S.dirty = true; updateUI(); }
 function pushSnap(s) { S.undo.push(s); S.redo = []; S.dirty = true; updateUI(); }
 function restore(json) {
   const old = structSig(S.pages), o = JSON.parse(json), oldV = new Map(S.pages.map(p => [p.id, JSON.stringify(p.vedits || {})]));
   S.pages = o.p; S.decor = o.d || {}; S.sel = null; S.vsel = null;
+  if (o.l) { S.layers = o.l; S.curLayer = S.layers.some(l => l.id === o.c) ? o.c : S.layers[S.layers.length - 1].id; S.pdfLocked = !!o.pl; }
+  renderLayers();
   if (structSig(S.pages) === old) {
     S.pages.forEach(p => {
       const v = V.get(p.id); if (!v) return;
@@ -968,7 +1205,7 @@ function redo() { commitEditor(); if (!S.redo.length) return; S.undo.push(serial
 
 /* ---------- Interactions sur la page ---------- */
 function toPdf(e, v) { const r = v.svg.getBoundingClientRect(); return v.vp.convertToPdfPoint(e.clientX - r.left, e.clientY - r.top); }
-function hitAnnot(e, v) { const n = e.target.closest?.('[data-aid]'), a = n && v.p.annots.find(x => x.id === n.dataset.aid); return a && !a.locked ? a : null; }
+function hitAnnot(e, v) { const n = e.target.closest?.('[data-aid]'), a = n && v.p.annots.find(x => x.id === n.dataset.aid); return a && !lockedA(a) && !hiddenA(a) ? a : null; }
 // Maj : angle multiple de 45° depuis le point de départ
 function snap45(P, Q) {
   const dx = Q[0] - P[0], dy = Q[1] - P[1], len = Math.hypot(dx, dy), ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * Math.PI / 4;
@@ -982,29 +1219,27 @@ function onDown(e, v) {
   const P = toPdf(e, v), p = v.p, R = v.rotation, t = S.tool, hit = hitAnnot(e, v);
   if (t === 'select') {
     const lk = e.target.closest('[data-unlock]');   // cadenas d'un élément verrouillé
-    if (lk) { const a = p.annots.find(x => x.id === lk.dataset.unlock); if (a) { unlockAnnots(p, groupMembers(p, a)); toast('Déverrouillé.', 1500); } return; }
+    if (lk) {
+      const d = lk.dataset.unlock, u = unitOf(v, d.startsWith('v:') ? { key: d.slice(2) } : { aid: d });
+      unlockUnits(v, u.annots, u.ords); toast('Déverrouillé.', 1500); return;
+    }
     const hd = e.target.closest('[data-handle]');
     if (hd?.dataset.handle === 'v') { const vs = vSel(); if (vs) return vDrag(e, v, vs.sh, v.svg); }
     if (hd?.dataset.handle === 'g') return groupResize(e, v);
     if (hd) { const a = selAnnot(); if (a) return drag(e, v, a, 'resize', null, hd.dataset.handle); }
-    if (hit && S.vsel?.pid === p.id && S.sel?.pid === p.id && selIds().includes(hit.id) && !(e.shiftKey || e.ctrlKey || e.metaKey))
-      return groupMove(e, v, v.svg, () => setSel(p.id, hit.id));   // groupe mêlant ajouts et éléments du PDF
     if (hit) {
-      const unit = unitIds(p, hit);   // l'élément, ou tout son groupe
-      if ((e.shiftKey || e.ctrlKey || e.metaKey) && S.vsel?.pid === p.id) {   // ajout ajouté à un groupe d'éléments du PDF
-        const ids = selIds(), on = ids.includes(hit.id), next = on ? ids.filter(x => !unit.includes(x)) : [...ids.filter(x => !unit.includes(x)), ...unit];
-        S.sel = next.length ? { pid: p.id, aid: next[next.length - 1], more: next.slice(0, -1) } : null;
-        drawAnnots(v); updateProps(); return;
+      const who = { aid: hit.id }, mixed = () => S.vsel?.pid === p.id;   // mixed : la sélection compte aussi des éléments du PDF
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {   // un clic ajoute ou retire (avec son groupe) ; un glisser déplace (Maj : sur un axe)
+        const had = curIds(v).includes(hit.id);
+        if (!had) toggleUnit(v, who);
+        const back = had ? () => toggleUnit(v, who) : null;
+        return mixed() ? groupMove(e, v, v.svg, back) : drag(e, v, hit, 'move', back);
       }
-      if (e.shiftKey || e.ctrlKey || e.metaKey) {   // un clic ajoute ou retire ; un glisser déplace (Maj : sur un axe)
-        if (selIds().includes(hit.id)) return drag(e, v, hit, 'move', () => toggleSel(p.id, hit.id));
-        toggleSel(p.id, hit.id);
-        return drag(e, v, hit, 'move');
-      }
-      const inSel = S.sel?.pid === p.id && selIds().includes(hit.id), inGroup = inSel && selIds().length > unit.length;
-      if (inSel) selectMany(p.id, selIds(), hit.id); else if (unit.length > 1) selectMany(p.id, unit, hit.id); else setSel(p.id, hit.id);
+      const inSel = curIds(v).includes(hit.id), inGroup = inSel && selSize(v) > unitSize(v, who);
+      if (!inSel) selectUnit(v, who); else if (!mixed()) selectMany(p.id, selIds(), hit.id);
       // Dans une sélection multiple, un simple clic sans déplacer ne garde que l'élément cliqué (ou son groupe)
-      const keepUnit = () => unit.length > 1 ? selectMany(p.id, unit, hit.id) : setSel(p.id, hit.id);
+      const keepUnit = () => selectUnit(v, who);
+      if (mixed()) return groupMove(e, v, v.svg, inGroup ? keepUnit : null);
       return drag(e, v, hit, 'move', hit.type === 'note' ? () => openNote(v, hit) : inGroup ? keepUnit : null);
     }
     return setSel(null);
@@ -1114,7 +1349,8 @@ function placeLike(g, o) {
 const ID6 = [1, 0, 0, 1, 0, 0];
 const libOf = src => src.lib ??= PDFLib.PDFDocument.load(src.bytes, { ignoreEncryption: true });
 function shapesOf(p) {
-  const src = S.sources[p.src]; src.shapes ??= new Map();
+  const src = S.sources[p.src]; if (!src) return Promise.resolve([]);   // document remplacé entre-temps
+  src.shapes ??= new Map();
   if (!src.shapes.has(p.idx)) src.shapes.set(p.idx, libOf(src).then(d => AtelierVector.scan(d, d.getPage(p.idx))).catch(e => { console.warn('Formes illisibles', e); return []; }));
   return src.shapes.get(p.idx);
 }
@@ -1141,10 +1377,11 @@ function edOf(p, sh) {
 }
 const mOf = (p, sh) => edOf(p, sh).m || ID6;
 // Formes et textes d'origine encore présents, chacun suivi de ses copies (ordre du dessin)
-function vList(v) {
+const vList = v => vListOf(v.p, v.shapes || []);
+function vListOf(p, shapes) {
   const out = [];
-  for (const sh of v.shapes || []) {
-    const e = v.p.vedits?.[sh.ord];
+  for (const sh of shapes) {
+    const e = p.vedits?.[sh.ord];
     if (!e?.del) out.push(sh);
     for (const c of e?.copies || []) out.push({ ...sh, copyId: c.id });
   }
@@ -1167,14 +1404,17 @@ function vBox(p, sh, m = mOf(p, sh)) {
   return bbox([[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]].map(q => AtelierVector.ap(m, q[0], q[1])));
 }
 // Élément visible le plus haut sous le point (les fonds qui couvrent presque toute la page sont ignorés)
-function vHit(v, P) {
-  const list = vList(v); if (!list.length) return null;
+// locked : ne chercher que parmi les éléments verrouillés (clic droit pour les déverrouiller)
+function vHit(v, P, locked = false) {
+  const list = vList(v); if (!list.length || (S.pdfLocked && !locked)) return null;   // contenu du PDF verrouillé (panneau Calques)
   const [x0, y0, x1, y1] = v.pg.view, page = (x1 - x0) * (y1 - y0);
   for (let i = list.length - 1; i >= 0; i--) {
-    const sh = list[i], m = mOf(v.p, sh), b = vBox(v.p, sh, m);
-    if ((b.x1 - b.x0) * (b.y1 - b.y0) > page * 0.85 || P[0] < b.x0 || P[0] > b.x1 || P[1] < b.y0 || P[1] > b.y1) continue;
+    const sh = list[i], m = mOf(v.p, sh), b = vBox(v.p, sh, m), t = sh.kind === 'stroke' ? 3 : 0;   // un trait se saisit à 3 pt près
+    if (!!vmOf(v.p, vKey(sh)).locked !== locked) continue;   // verrouillé : on clique à travers
+    if ((b.x1 - b.x0) * (b.y1 - b.y0) > page * 0.85 || P[0] < b.x0 - t || P[0] > b.x1 + t || P[1] < b.y0 - t || P[1] > b.y1 + t) continue;
     const Q = m !== ID6 ? AtelierVector.ap(AtelierVector.inv(m) || ID6, P[0], P[1]) : P;
-    if (AtelierVector.inside(sh.polys, Q, sh.evenodd)) return sh;
+    // Tracé au trait : près du trait, ou n'importe où dans une petite icône
+    if (sh.kind === 'stroke' ? AtelierVector.near(sh.polys, Q, t) || (b.x1 - b.x0 < 40 && b.y1 - b.y0 < 40) : AtelierVector.inside(sh.polys, Q, sh.evenodd)) return sh;
   }
   return null;
 }
@@ -1197,14 +1437,7 @@ function setVsel(v, sh) {
   if (prevV && prevV !== v.p.id) redraw(prevV);
   drawAnnots(v); updateProps();
 }
-function toggleVsel(v, sh) {
-  if (S.vsel && S.vsel.pid !== v.p.id) return setVsel(v, sh);
-  if (S.sel && S.sel.pid !== v.p.id) { const q = S.sel.pid; S.sel = null; redraw(q); }
-  const k = vKey(sh), ords = S.vsel?.ords || [];
-  S.vsel = { pid: v.p.id, ords: ords.includes(k) ? ords.filter(o => o !== k) : [...ords, k] };
-  if (!S.vsel.ords.length) S.vsel = null;
-  drawAnnots(v); updateProps();
-}
+function toggleVsel(v, sh) { toggleUnit(v, { key: vKey(sh) }); }
 // Image de chaque texte sélectionné, découpée dans la page affichée (aperçu pendant le déplacement)
 function textCrops(v, items) {
   const out = new Map();
@@ -1231,7 +1464,7 @@ function groupMove(e, v, el, onClick) {
   const orig = annots.map(clone);
   const items = S.vsel?.pid === p.id ? vList(v).filter(s => S.vsel.ords.includes(vKey(s))) : [];
   const m0 = new Map(items.map(sh => [vKey(sh), mOf(p, sh)]));
-  const start = toPdf(e, v), snap = serialize();
+  const start = toPdf(e, v), snap = serialize(), gmap = new Map();   // gmap : groupe d'origine -> groupe des copies
   let moved = false, dx = 0, dy = 0;
   const at = sh => AtelierVector.mul(m0.get(vKey(sh)), [1, 0, 0, 1, dx, dy]);
   try { el.setPointerCapture(e.pointerId); } catch {}
@@ -1241,7 +1474,7 @@ function groupMove(e, v, el, onClick) {
     if (!moved && Math.hypot(Q[0] - start[0], Q[1] - start[1]) * v.vp.scale < 3) return;
     if (!moved) {
       pushSnap(snap); moved = true; v.vcrops = textCrops(v, items);
-      if (dup) annots = freshGids(orig.map(o => { const c = clone(o); c.id = uid(); if (c.type === 'field') c.name = fieldName(c.name); p.annots.push(c); return c; }));
+      if (dup) annots = freshGids(orig.map(o => { const c = clone(o); c.id = uid(); if (c.type === 'field') c.name = fieldName(c.name); p.annots.push(c); return c; }), gmap);
     }
     annots.forEach((a, i) => { placeLike(a, orig[i]); shiftAnnot(a, dx, dy); });
     v.vghost = items.length ? items.map(sh => ({ sh, m: at(sh) })) : null;
@@ -1257,6 +1490,8 @@ function groupMove(e, v, el, onClick) {
         base.copies = [...(base.copies || []), { id, m: round4(at(sh)), ...(fill ? { fill } : {}) }];
         next = { ...(next || {}), [sh.ord]: base };
         keys.push(`${sh.ord}:${id}`);
+        const g = vmOf(p, vKey(sh)).gid;   // la copie forme son propre groupe, comme les ajouts copiés avec elle
+        if (g) { if (!gmap.has(g)) gmap.set(g, uid()); setVm(p, `${sh.ord}:${id}`, { gid: gmap.get(g) }); }
       } else { next = withEdit(next, sh, { m: round4(at(sh)) }); keys.push(vKey(sh)); }
     }
     if (dup && annots.length) S.sel = { pid: p.id, aid: annots[annots.length - 1].id, more: annots.slice(0, -1).map(a => a.id) };
@@ -1310,8 +1545,8 @@ function vDelete() {
   const { p, v, list } = it, annots = S.sel?.pid === p.id ? selAnnots() : [];
   snapshot();
   let next = p.vedits;
-  for (const sh of list) next = sh.copyId ? withEdit(next, sh, null) : withEdit(next, sh, { del: true });
-  p.vedits = next;
+  for (const sh of list) { next = sh.copyId ? withEdit(next, sh, null) : withEdit(next, sh, { del: true }); setVm(p, vKey(sh), { gid: null, locked: null }); }
+  p.vedits = next; pruneGroups(p);
   if (annots.length) { p.annots = p.annots.filter(a => !annots.includes(a)); pruneGroups(p); }
   S.vsel = null; S.sel = null; drawAnnots(v); updateProps(); refreshView(v); renderComments();
 }
@@ -1333,13 +1568,18 @@ function marquee(e, v, keep, keepV = []) {
     if (!m) return;
     v.marquee = null;
     // Un groupe n'est pris que s'il est entièrement dans le cadre ; les éléments verrouillés jamais
-    const inside = new Set(v.p.annots.filter(a => groupable(a) && !a.locked && within(annotBox(a), m)).map(a => a.id));
-    const ids = v.p.annots.filter(a => inside.has(a.id) && groupMembers(v.p, a).every(x => inside.has(x.id))).map(a => a.id), all = [...new Set([...keep, ...ids])];
+    const inside = new Set(v.p.annots.filter(a => groupable(a) && !lockedA(a) && !hiddenA(a) && within(annotBox(a), m)).map(a => a.id));
     const [px0, py0, px1, py1] = v.pg.view, page = (px1 - px0) * (py1 - py0);
-    const ords = vList(v).filter(sh => {
+    const insideV = new Set(vList(v).filter(sh => {
       const b = vBox(v.p, sh);
-      return within(b, m) && (b.x1 - b.x0) * (b.y1 - b.y0) <= page * 0.85;   // pas les fonds de page
-    }).map(vKey);
+      return !S.pdfLocked && !vmOf(v.p, vKey(sh)).locked && within(b, m) && (b.x1 - b.x0) * (b.y1 - b.y0) <= page * 0.85;   // pas les fonds de page
+    }).map(vKey));
+    const full = new Map(), whole = gid => {
+      if (!full.has(gid)) { const g = gidMembers(v, gid); full.set(gid, g.annots.every(a => inside.has(a.id)) && g.ords.every(k => insideV.has(k))); }
+      return full.get(gid);
+    };
+    const ids = v.p.annots.filter(a => inside.has(a.id) && (!a.gid || whole(a.gid))).map(a => a.id), all = [...new Set([...keep, ...ids])];
+    const ords = [...insideV].filter(k => !vmOf(v.p, k).gid || whole(vmOf(v.p, k).gid));
     const allV = [...new Set([...keepV, ...ords])];
     if (all.length) selectMany(v.p.id, all); else { S.sel = null; }
     S.vsel = allV.length ? { pid: v.p.id, ords: allV } : null;
@@ -1356,7 +1596,7 @@ function snapTargets(v, skip) {
   const [px0, py0, px1, py1] = v.pg.view, xs = [], ys = [], boxes = [];
   xs.push({ at: (px0 + px1) / 2, span: [py0, py1] }); ys.push({ at: (py0 + py1) / 2, span: [px0, px1] });
   for (const o of v.p.annots) {
-    if (skip.has(o.id) || isRedact(o) || !groupable(o)) continue;
+    if (skip.has(o.id) || isRedact(o) || !groupable(o) || hiddenA(o)) continue;
     const b = annotBox(o); boxes.push(b);
     for (const x of [b.x0, (b.x0 + b.x1) / 2, b.x1]) xs.push({ at: x, span: [b.y0, b.y1] });
     for (const y of [b.y0, (b.y0 + b.y1) / 2, b.y1]) ys.push({ at: y, span: [b.x0, b.x1] });
@@ -1930,6 +2170,7 @@ function commitEditor() {
 /* ---------- Barre de propriétés ---------- */
 const TOOL_CTX = { draw: 'ink', check: 'ink', cross: 'ink', rect: 'shape', ellipse: 'shape', line: 'shape', arrow: 'shape', ftext: 'field', fcheck: 'field' };
 function updateProps(force) {
+  renderLayers();
   if (CROP) {   // cadrage d'une image en cours
     const el = $('#props'), z = CROP.a.fit.zoom;
     propsKey = 'crop';
@@ -1944,13 +2185,16 @@ function updateProps(force) {
   const vi = vItems();
   if (vi && !vSel()) {   // plusieurs éléments du PDF, un texte du PDF, ou un groupe mêlé d'ajouts
     const n = vi.list.length + (S.sel ? selIds().length : 0), oneText = n === 1 && vi.list[0].kind === 'text';
-    const key = `vgroup|${vi.p.id}|${S.vsel.ords.join(',')}|${selIds().join(',')}`;
+    const m = selMembers(), units = m ? unitCount(m) : n, grp = curGroup(), grouped = !!m && (m.annots.some(a => a.gid) || m.keys.some(k => vmOf(m.p, k).gid));
+    const key = `vgroup|${vi.p.id}|${S.vsel.ords.join(',')}|${selIds().join(',')}|${grp?.gid || ''}|${grouped}`;
     if (key === propsKey && !force) return; propsKey = key;
     const el = $('#props');
-    el.innerHTML = `<span class="hint"><b>${oneText ? 'Texte du PDF' : `${n} éléments sélectionnés`}</b></span>`
+    el.innerHTML = `<span class="hint"><b>${grp ? `Groupe de ${n} éléments` : oneText ? 'Texte du PDF' : `${n} éléments sélectionnés`}</b></span>`
+      + groupButtons(units, grouped)
       + `<button class="btn danger" data-act="vdel" title="Supprimer (Suppr)">${icon('trash')}Supprimer</button>`
-      + `<span class="hint">${oneText ? 'Faites-le glisser pour le déplacer ; double-cliquez pour modifier ses mots.' : 'Faites glisser l\'un d\'eux pour tout déplacer. Maj+clic pour en ajouter ou en retirer.'}</span>`;
+      + `<span class="hint">${grp ? 'Faites-le glisser pour le déplacer, poignée bleue pour le redimensionner.' : oneText ? 'Faites-le glisser pour le déplacer ; double-cliquez pour modifier ses mots.' : 'Faites glisser l\'un d\'eux pour tout déplacer. Maj+clic pour en ajouter ou en retirer.'}</span>`;
     el.querySelector('[data-act=vdel]').addEventListener('click', vDelete);
+    bindGroupButtons(el);
     return;
   }
   const vs = vSel();
@@ -1958,11 +2202,13 @@ function updateProps(force) {
     const ed = edOf(vs.p, vs.sh), fill = ed.fill || vs.sh.fill, key = `vshape|${vs.p.id}:${vKey(vs.sh)}|${!!(ed.m || ed.fill)}`;
     if (key === propsKey && !force) return; propsKey = key;
     const el = $('#props');
-    el.innerHTML = `<span class="hint"><b>Bloc du PDF</b></span>`
-      + (fill ? `<label>Couleur <input type="color" data-vfill value="${fill}"></label>` : '<span class="hint">Couleur en dégradé ou en motif : non modifiable.</span>')
+    el.innerHTML = `<span class="hint"><b>${vs.sh.kind === 'stroke' ? 'Tracé du PDF' : 'Bloc du PDF'}</b></span>`
+      + (vs.sh.kind === 'stroke' ? '' : fill ? `<label>Couleur <input type="color" data-vfill value="${fill}"></label>` : '<span class="hint">Couleur en dégradé ou en motif : non modifiable.</span>')
       + (!vs.sh.copyId && (ed.m || ed.fill) ? '<button class="btn" data-act="vreset" title="Remettre le bloc comme dans le PDF d\'origine">Rétablir</button>' : '')
+      + groupButtons(1, false)
       + `<button class="btn danger" data-act="vdel" title="Supprimer (Suppr)">${icon('trash')}Supprimer</button>`
       + '<span class="hint">Faites glisser pour déplacer, poignée bleue pour redimensionner (Maj : garder les proportions).</span>';
+    bindGroupButtons(el);
     el.querySelector('[data-vfill]')?.addEventListener('change', e => vChange({ fill: e.target.value }));
     el.querySelector('[data-act=vreset]')?.addEventListener('click', () => vChange(null));
     el.querySelector('[data-act=vdel]').addEventListener('click', vDelete);
@@ -1972,7 +2218,7 @@ function updateProps(force) {
   let ctx = a ? (a.type === 'rect' ? (a.erase ? 'erase' : a.kind) : a.type === 'line' ? 'shape' : a.type) : t;
   ctx = TOOL_CTX[ctx] || ctx;
   const crop = S.pages[S.cur]?.crop;
-  const key = ctx + '|' + selIds().join(',') + '|' + selAnnots().map(x => x.gid || '').join(',') + '|' + t + '|' + !!S.pendingSig + '|' + !!crop;
+  const key = ctx + '|' + selIds().join(',') + '|' + selAnnots().map(x => (x.gid || '') + ':' + x.layer).join(',') + '|' + S.layers.map(l => l.id + l.name).join() + '|' + t + '|' + !!S.pendingSig + '|' + !!crop;
   if (key === propsKey && !force) return; propsKey = key;
   const el = $('#props'); let h = '';
   const color = (g, val, label = 'Couleur', k = 'color') => `<label>${label} <input type="color" data-g="${g}" data-k="${k}" value="${val}"></label>`;
@@ -2047,7 +2293,7 @@ function updateProps(force) {
     h = a ? `<button class="btn" data-act="replaceimg" title="La nouvelle image est recadrée au centre pour remplir le même cadre">${icon('image')}Remplacer l'image…</button><button class="btn" data-act="cropimg" title="Ou double-cliquez sur l'image">${icon('crop')}Recadrer</button><span class="hint">Faites glisser pour déplacer, poignée bleue pour redimensionner.</span>`
           : `<button class="btn" data-act="img">${S.pendingImg ? "Changer d'image" : 'Choisir une image'}</button>` + (S.pendingImg ? '<span class="hint">Cliquez sur la page pour placer l\'image.</span>' : '');
   } else if (ctx === 'select') {
-    h = `<span class="hint" title="Ctrl+A : tout sélectionner · Ctrl+C / Ctrl+V : copier-coller · Ctrl+D : dupliquer · Ctrl+G / Ctrl+Maj+G : grouper / dégrouper · Ctrl+L / Ctrl+Maj+L : verrouiller / tout déverrouiller · Flèches : ajuster (Maj : ×10) · Alt en déplaçant : déplacer une copie · Ctrl en déplaçant : sans aimant">Cliquez sur un élément pour le déplacer, double-cliquez sur un texte pour le modifier. Maj+clic ou cadre tiré dans le vide : plusieurs éléments.</span>`;
+    h = `<span class="hint" title="Ctrl+A : tout sélectionner · Ctrl+C / Ctrl+V : copier-coller · Ctrl+D : dupliquer · Ctrl+G / Ctrl+Maj+G : grouper / dégrouper · Ctrl+L / Ctrl+Maj+L : verrouiller / tout déverrouiller · Ctrl+↑ / Ctrl+↓ : avancer / reculer (Maj : premier plan / arrière-plan) · Flèches : ajuster (Maj : ×10) · Alt en déplaçant : déplacer une copie · Ctrl en déplaçant : sans aimant">Cliquez sur un élément pour le déplacer, double-cliquez sur un texte pour le modifier. Maj+clic ou cadre tiré dans le vide : plusieurs éléments.</span>`;
   }
   if (a) {
     const units = selUnits(), n = units.length, grp = selGroup(), texts = units.filter(u => u.length === 1 && baselineOf(u[0]) != null).length;
@@ -2059,10 +2305,12 @@ function updateProps(force) {
         + (texts > 1 ? ab('baseline', 'baseline', 'Aligner les lignes de base des textes sur le dernier sélectionné') : '')
         + (n > 2 ? db('h', 'distH', 'Répartir horizontalement') + db('v', 'distV', 'Répartir verticalement') : '') + '</span>'
       : `<span class="aligns" role="group" aria-label="Centrer sur la page">${ab('hcenter', 'alignHC', 'Centrer horizontalement sur la page')}${ab('vcenter', 'alignVC', 'Centrer verticalement sur la page')}</span>`;
-    if (grp) h = `<span class="hint"><b>Groupe de ${grp.length} éléments</b></span>` + h;
-    if (n > 1) h += `<button class="btn" data-act="group" title="Grouper (Ctrl+G) : se sélectionnent, se déplacent et se redimensionnent ensemble">${icon('group')}Grouper</button>`;
-    if (units.some(u => u.length > 1)) h += `<button class="btn" data-act="ungroup" title="Dégrouper (Ctrl+Maj+G)">${icon('ungroup')}Dégrouper</button>`;
-    h += `<button class="btn" data-act="lock" title="Verrouiller (Ctrl+L) : ne se sélectionne plus au clic, pour atteindre facilement ce qui est autour">${icon('lock')}Verrouiller</button>`;
+    if (grp) h = `<span class="hint"><b>Groupe de ${grp.annots.length + grp.items.length} éléments</b></span>` + h;
+    h += groupButtons(n, units.some(u => u.length > 1));
+    if (S.layers.length > 1) {   // calque des éléments sélectionnés
+      const cur = new Set(selAnnots().map(x => x.layer));
+      h += `<label title="Calque des éléments sélectionnés">${icon('layers')}<select data-tolayer>${cur.size > 1 ? '<option value="">Plusieurs calques</option>' : ''}${[...S.layers].reverse().map(L => `<option value="${L.id}"${cur.size === 1 && cur.has(L.id) ? ' selected' : ''}>${escHtml(L.name)}</option>`).join('')}</select></label>`;
+    }
     h += `<button class="btn danger" data-act="del" title="Supprimer (Suppr)">${icon('trash')}Supprimer</button>`;
   }
   el.innerHTML = h;
@@ -2087,9 +2335,8 @@ function updateProps(force) {
   });
   el.querySelector('[data-fmulti]')?.addEventListener('click', e => { snapshot(); a.multiline = !a.multiline; e.currentTarget.setAttribute('aria-pressed', a.multiline); });
   el.querySelector('[data-act=del]')?.addEventListener('click', deleteSel);
-  el.querySelector('[data-act=group]')?.addEventListener('click', groupSel);
-  el.querySelector('[data-act=ungroup]')?.addEventListener('click', ungroupSel);
-  el.querySelector('[data-act=lock]')?.addEventListener('click', lockSel);
+  bindGroupButtons(el);
+  el.querySelector('[data-tolayer]')?.addEventListener('change', e => { if (e.target.value) moveToLayer(e.target.value); });
   el.querySelectorAll('[data-align]').forEach(b => b.addEventListener('click', () => alignSel(b.dataset.align)));
   el.querySelectorAll('[data-dist]').forEach(b => b.addEventListener('click', () => distributeSel(b.dataset.dist)));
   el.querySelector('[data-act=sig]')?.addEventListener('click', openSig);
@@ -2103,6 +2350,16 @@ function updateProps(force) {
   el.querySelector('[data-act=editlink]')?.addEventListener('click', () => { const v = V.get(S.sel.pid); if (v) editLink(v, a); });
   el.querySelector('[data-act=golink]')?.addEventListener('click', () => followLink(a.type === 'text' ? a.link : a.target));
   el.querySelector('[data-act=cropoff]')?.addEventListener('click', () => { snapshot(); delete S.pages[S.cur].crop; redrawAll(); propsKey = ''; updateProps(); });
+}
+// Boutons Grouper / Dégrouper / Verrouiller de la barre de propriétés (units : nombre d'unités sélectionnées)
+const groupButtons = (units, grouped) =>
+  (units > 1 ? `<button class="btn" data-act="group" title="Grouper (Ctrl+G) : se sélectionnent, se déplacent et se redimensionnent ensemble">${icon('group')}Grouper</button>` : '')
+  + (grouped ? `<button class="btn" data-act="ungroup" title="Dégrouper (Ctrl+Maj+G)">${icon('ungroup')}Dégrouper</button>` : '')
+  + `<button class="btn" data-act="lock" title="Verrouiller (Ctrl+L) : ne se sélectionne plus au clic, pour atteindre facilement ce qui est autour">${icon('lock')}Verrouiller</button>`;
+function bindGroupButtons(el) {
+  el.querySelector('[data-act=group]')?.addEventListener('click', groupSel);
+  el.querySelector('[data-act=ungroup]')?.addEventListener('click', ungroupSel);
+  el.querySelector('[data-act=lock]')?.addEventListener('click', lockSel);
 }
 function setStyle(g, k, val) {
   if (val === '__orig') return;
@@ -2139,13 +2396,22 @@ function pasteClip() {
   });
   setTool('select'); selectMany(p.id, ids);
 }
+// Flèches : 1 pt, Maj : 10 pt. Ajouts et éléments du PDF sélectionnés bougent ensemble (la page est redessinée un instant après)
+let nudgeT = 0;
 function nudgeSel(dx, dy) {
-  const list = selAnnots(); if (!list.length) return;
-  snapshot(); list.forEach(a => shiftAnnot(a, dx, dy)); redraw(S.sel.pid);
+  const m = selMembers(); if (!m || !(m.annots.length + m.items.length)) return;
+  snapshot(); m.annots.forEach(a => shiftAnnot(a, dx, dy));
+  if (m.items.length) {
+    let next = m.p.vedits;
+    for (const sh of m.items) next = withEdit(next, sh, { m: round4(AtelierVector.mul(mOf(m.p, sh), [1, 0, 0, 1, dx, dy])) });
+    m.p.vedits = next;
+    clearTimeout(nudgeT); nudgeT = setTimeout(() => refreshView(m.v), 180);
+  }
+  drawAnnots(m.v);
 }
 function selectAll() {
   const p = S.pages[S.cur]; if (!p) return;
-  setTool('select'); selectMany(p.id, p.annots.filter(a => groupable(a) && !a.locked).map(a => a.id));
+  setTool('select'); selectMany(p.id, p.annots.filter(a => groupable(a) && !lockedA(a) && !hiddenA(a)).map(a => a.id));
 }
 function deleteSel() {
   const list = selAnnots(); if (!list.length) return;
@@ -2303,7 +2569,8 @@ async function assemble(list, { fresh = false } = {}) {
 async function annotsFor(list, i) {
   const p = list[i], pg = await getPdfPage(p);
   const ocr = (p.ocr || []).map(o => ({ type: 'ocr', ...o }));
-  return [...ocr, ...decorFor(p, i, list.length, pg.view, ((pg.rotate || 0) + p.rot) % 360), ...p.annots];
+  adopt(p);
+  return [...ocr, ...decorFor(p, i, list.length, pg.view, ((pg.rotate || 0) + p.rot) % 360), ...stacked(p.annots).filter(a => !hiddenA(a))];
 }
 // Note PDF native (/Text) avec son apparence : visible et modifiable dans les autres lecteurs
 function addNoteAnnot(out, page, a) {
@@ -2414,14 +2681,19 @@ async function paintAnnots(out, page, annots, cache) {
 async function paintPage(out, page, all, p, cache) {
   const mine = new Set(p.annots.filter(AtelierLayer.keep)), layer = all.filter(a => mine.has(a));
   const drawn = await paintAnnots(out, page, all.filter(a => !mine.has(a)), cache);
-  if (!layer.length) return drawn;
+  const vitems = await vitemsOf(p);   // éléments du PDF groupés ou verrouillés
+  const hidden = stacked(p.annots).filter(a => hiddenA(a) && AtelierLayer.keep(a));   // calques masqués : décrits, pas dessinés
+  const docLayers = cache.pageIdx?.get(p.id) === 0 && customLayers() ? { layers: S.layers, pdfLocked: S.pdfLocked } : null;
+  if (!layer.length && !vitems.length && !hidden.length && !docLayers) return drawn;
   const refs = () => { const c = page.node.get(PDFLib.PDFName.of('Contents')); return c instanceof PDFLib.PDFArray ? c.asArray() : [c]; };
   const before = new Set(refs().map(r => r?.tag));
-  page.getContentStream(false);   // nouveau flux, séparé de celui des autres ajouts
-  drawn.push(...await paintAnnots(out, page, layer, cache));
+  if (layer.length) {
+    page.getContentStream(false);   // nouveau flux, séparé de celui des autres ajouts
+    drawn.push(...await paintAnnots(out, page, layer, cache));
+  }
   // Les images sont désignées par leur référence dans le fichier, pas recopiées dans la description
   const images = new Map(Object.entries(cache.imgs || {}).map(([src, im]) => [src, im.ref]));
-  AtelierLayer.write(out, page, layer, refs().filter(r => r instanceof PDFLib.PDFRef && !before.has(r.tag)), { images, pageIndex: cache.pageIdx });
+  AtelierLayer.write(out, page, [...layer, ...hidden], layer.length ? refs().filter(r => r instanceof PDFLib.PDFRef && !before.has(r.tag)) : [], { images, pageIndex: cache.pageIdx, vitems, docLayers });
   return drawn;
 }
 
@@ -3116,6 +3388,7 @@ function showPane(name) {
   document.querySelectorAll('#side .pane').forEach(p => { p.hidden = p.id !== name; });
   if (name === 'outline') renderOutline();
   if (name === 'comments') renderComments();
+  if (name === 'layers') renderLayers();
 }
 function goToSource(src, idx) {
   const i = S.pages.findIndex(p => p.src === src && p.idx === idx);
@@ -3472,7 +3745,8 @@ const ACTIONS = {
   btnDelPages: deletePages, btnRotAll: rotateAll, btnCrop: () => { setTool('crop'); toast('Faites glisser sur la partie de la page à garder.'); },
   btnHeader: openHeaderFooter, btnWatermark: openWatermark, btnOcr: () => openOcr(), btnCompare: () => $('#fileCompare').click(),
   btnProtect: openProtect, btnClean: () => openClean(), btnCompress: () => openCompress(), btnProps: openProps,
-  btnExportImg: exportImages, btnExportTxt: exportText, btnGroup: groupSel, btnUngroup: ungroupSel, btnLock: lockSel, btnUnlockAll: () => unlockAll(), btnPrint: printDoc, btnFind: openFind,
+  btnExportImg: exportImages, btnExportTxt: exportText, btnGroup: groupSel, btnUngroup: ungroupSel, btnLock: lockSel, btnUnlockAll: () => unlockAll(),
+  btnFront: () => restack('front'), btnUp: () => restack('up'), btnDown: () => restack('down'), btnBack: () => restack('back'), btnLayers: () => showPane('layers'), btnPrint: printDoc, btnFind: openFind,
 };
 for (const [id, fn] of Object.entries(ACTIONS)) $('#' + id)?.addEventListener('click', () => { if (!S.pages.length) return toast("Ouvrez d'abord un PDF."); commitEditor(); fn(); });
 $('#fileInsert').addEventListener('change', e => { addFiles(e.target.files, false, null, S.cur + 1); e.target.value = ''; });
@@ -3563,9 +3837,10 @@ window.addEventListener('keydown', e => {
   if (mod && k === 'a' && S.pages.length) { e.preventDefault(); selectAll(); return; }
   if (mod && k === 'g' && S.pages.length) { e.preventDefault(); e.shiftKey ? ungroupSel() : groupSel(); return; }
   if (mod && k === 'l' && S.pages.length) { e.preventDefault(); e.shiftKey ? unlockAll() : lockSel(); return; }
+  if (mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && (S.sel || S.vsel)) { e.preventDefault(); restack(e.key === 'ArrowUp' ? (e.shiftKey ? 'front' : 'up') : (e.shiftKey ? 'back' : 'down')); return; }
   if (mod) return;
   const arrow = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
-  if (arrow && S.sel) { e.preventDefault(); const d = e.shiftKey ? 10 : 1; nudgeSel(arrow[0] * d, arrow[1] * d); return; }
+  if (arrow && (S.sel || S.vsel)) { e.preventDefault(); const d = e.shiftKey ? 10 : 1; nudgeSel(arrow[0] * d, arrow[1] * d); return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && S.vsel) { e.preventDefault(); vDelete(); return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && S.sel) { e.preventDefault(); deleteSel(); return; }
   if (e.key === 'Escape') { if (!$('#findbar').hidden) return closeFind(); S.sel || S.vsel ? setSel(null) : setTool('select'); return; }
@@ -3577,7 +3852,7 @@ window.addEventListener('beforeunload', e => { if (S.dirty) { e.preventDefault()
 // Application Windows : PDF ouvert par double-clic dans l'Explorateur
 window.desktop?.onOpenFile(f => addFiles([new File([f.bytes], f.name, { type: 'application/pdf' })], true, f.dir));
 
-if (location.hash === '#test') window.__atelier = { S, sampleFile, addFiles, exportPdf, buildPdf, openPdfjs, rebuild, setTool, producePdf, runFind, markAllHits, makeStamp, safeUrl, openOcr, openClean, openHeaderFooter, openWatermark, openProps, openProtect, openCompress, splitDoc, deletePages, exportImages, copySel, pasteClip, nudgeSel, setSel, fontsReady, selectMany, selectAll, selAnnots, alignSel, distributeSel, deleteSel, groupSel, ungroupSel, lockSel, unlockAll, toggleSel, selGroup, undo, redo, annotBox: a => annotBox(a), V, replaceImage, enterCrop, exitCrop, setCropFit, bakeImage, followLink, pdfLinkTarget, vHit, setVsel, vSel, vChange, vDelete, renderPage, shapesOf, replaceTextAt, ensureText, itemAt, fontOf, DYN, appBytes };   // tests automatiques
+if (location.hash === '#test') window.__atelier = { S, sampleFile, addFiles, exportPdf, buildPdf, openPdfjs, rebuild, setTool, producePdf, runFind, markAllHits, makeStamp, safeUrl, openOcr, openClean, openHeaderFooter, openWatermark, openProps, openProtect, openCompress, splitDoc, deletePages, exportImages, copySel, pasteClip, nudgeSel, setSel, fontsReady, selectMany, selectAll, selAnnots, alignSel, distributeSel, deleteSel, restack, moveToLayer, addLayer, moveLayer, toggleLayer, deleteLayer, groupSel, ungroupSel, lockSel, unlockAll, toggleSel, selGroup, undo, redo, annotBox: a => annotBox(a), V, replaceImage, enterCrop, exitCrop, setCropFit, bakeImage, followLink, pdfLinkTarget, vHit, setVsel, vSel, vChange, vDelete, renderPage, shapesOf, replaceTextAt, ensureText, itemAt, fontOf, DYN, appBytes };   // tests automatiques
 
 setTool('select'); updateUI();
 fontsReady.then(() => { if (S.pages.length) redrawAll(); });

@@ -16,8 +16,10 @@ const keep = a => ['text', 'image', 'shape', 'line', 'ink'].includes(a.type) || 
 
 // Enregistre la description des éléments d'une page et la liste des flux qui les dessinent.
 // opts.images : image source -> référence de l'image dessinée ; opts.pageIndex : id de page -> position dans le fichier
+// opts.vitems : éléments d'origine du PDF groupés ou verrouillés, repérés par leur genre et leur boîte (voir app.js)
 function write(doc, page, annots, contentRefs, opts = {}) {
-  if (!annots.length || !contentRefs.length) return;
+  const vitems = opts.vitems || [], docLayers = opts.docLayers;
+  if (!annots.length && !vitems.length && !docLayers) return;
   const ctx = doc.context, imgRefs = [], slot = new Map();
   const list = annots.map(a => {
     const o = { ...a };
@@ -30,7 +32,8 @@ function write(doc, page, annots, contentRefs, opts = {}) {
     }
     return o;
   });
-  const json = JSON.stringify({ v: VERSION, annots: list });
+  // Les éléments d'un calque masqué figurent dans la description sans être dessinés (opts.hidden : leurs identifiants)
+  const json = JSON.stringify({ v: VERSION, annots: list, ...(vitems.length ? { vitems } : {}), ...(docLayers ? { layers: docLayers } : {}) });
   const dict = { Type: TYPE, V: VERSION, Contents: contentRefs };
   if (imgRefs.length) dict.Images = imgRefs;
   page.node.set(N(KEY), ctx.register(ctx.flateStream(new TextEncoder().encode(json), dict)));
@@ -51,7 +54,8 @@ function hasLayer(bytes) {
 async function read(bytes) {
   if (!hasLayer(bytes)) return null;
   const doc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
-  const ctx = doc.context, layers = new Map();
+  const ctx = doc.context, layers = new Map(), vmeta = new Map();
+  let docLayers = null;
   for (const [i, page] of doc.getPages().entries()) {
     const ref = page.node.get(N(KEY));
     const st = ref instanceof PDFRef ? ctx.lookup(ref) : null;
@@ -59,18 +63,26 @@ async function read(bytes) {
     if (!(st instanceof PDFRawStream) || st.dict.lookup(N('Type'))?.decodeText?.() !== TYPE) continue;
     let data;
     try { data = JSON.parse(new TextDecoder().decode(decodePDFRawStream(st).decode())); } catch (e) { console.warn('Calque illisible', e); continue; }
+    // Éléments d'origine groupés ou verrouillés : retrouvés sur la page à l'ouverture (app.js)
+    const vitems = (Array.isArray(data?.vitems) ? data.vitems.slice(0, 50000) : []).map(vitem).filter(Boolean);
+    if (vitems.length) vmeta.set(i, vitems);
+    if (!docLayers) docLayers = layerList(data?.layers);   // calques du document (décrits sur la première page)
+    ctx.delete(ref);
     const own = st.dict.lookup(N('Contents'));
     const drop = new Set(own instanceof PDFArray ? own.asArray().filter(r => r instanceof PDFRef).map(r => r.tag) : []);
     const contents = page.node.get(N('Contents'));
     const arr = contents instanceof PDFRef ? ctx.lookup(contents) : contents;
-    if (!drop.size || !(arr instanceof PDFArray)) continue;
-    const left = arr.asArray().filter(r => !(r instanceof PDFRef && drop.has(r.tag)));
-    if (left.length === arr.size()) continue;   // flux introuvables : le calque ne correspond plus à la page
-    // Images désignées par la description, relues avant de retirer quoi que ce soit
+    // Sans flux à nous (seulement des éléments de calques masqués) : rien à retirer de la page
+    if (drop.size) {
+      if (!(arr instanceof PDFArray)) continue;
+      const left = arr.asArray().filter(r => !(r instanceof PDFRef && drop.has(r.tag)));
+      if (left.length === arr.size()) continue;   // flux introuvables : le calque ne correspond plus à la page
+      page.node.set(N('Contents'), ctx.obj(left));
+      drop.forEach(tag => { const r = arr.asArray().find(x => x instanceof PDFRef && x.tag === tag); if (r) ctx.delete(r); });
+    }
+    // Images désignées par la description
     const imgs = st.dict.lookup(N('Images')), srcs = [];
     if (imgs instanceof PDFArray) for (const r of imgs.asArray()) srcs.push(r instanceof PDFRef ? await imageUrl(ctx, r).catch(e => (console.warn('Image du calque illisible', e), null)) : null);
-    page.node.set(N('Contents'), ctx.obj(left));
-    ctx.delete(ref); drop.forEach(tag => { const r = arr.asArray().find(x => x instanceof PDFRef && x.tag === tag); if (r) ctx.delete(r); });
     // Liens que nos textes avaient posés : le texte les recréera à l'enregistrement
     const an = page.node.lookup(N('Annots'));
     if (an instanceof PDFArray) page.node.set(N('Annots'), ctx.obj(an.asArray().filter(r => ctx.lookup(r)?.lookup?.(N('NM'))?.decodeText?.() !== LINK)));
@@ -79,8 +91,8 @@ async function read(bytes) {
       .map(sanitize).filter(Boolean);
     if (annots.length) layers.set(i, annots);
   }
-  if (!layers.size) return null;
-  return { bytes: await doc.save({ useObjectStreams: false }), layers };
+  if (!layers.size && !vmeta.size && !docLayers) return null;
+  return { bytes: await doc.save({ useObjectStreams: false }), layers, vmeta, docLayers };
 }
 
 /* ---------- Image du PDF -> data: URL (JPEG tel quel, sinon PNG avec sa transparence) ---------- */
@@ -135,13 +147,29 @@ function link(l) {
   if (l?.kind === 'page' && Number.isInteger(l.index) && l.index >= 0 && l.index < 100000) return { kind: 'page', index: l.index };
   return null;
 }
+// Élément d'origine : genre (texte ou forme pleine), boîte [x0, y0, x1, y1], groupe et/ou verrou
+function vitem(x) {
+  if (!x || !['text', 'fill', 'stroke'].includes(x.k) || !Array.isArray(x.b) || x.b.length !== 4 || !x.b.every(v => num(v))) return null;
+  const o = { k: x.k, b: x.b.slice() };
+  if (typeof x.gid === 'string' && /^[a-z0-9]{1,16}$/.test(x.gid)) o.gid = x.gid;
+  if (x.locked === true) o.locked = true;
+  return o.gid || o.locked ? o : null;
+}
 // Propriétés communes à tous les éléments : groupe (identifiant court) et verrou
 function sanitize(a) {
   const o = sanitizeOne(a);
   if (!o) return null;
   if (typeof a.gid === 'string' && /^[a-z0-9]{1,16}$/.test(a.gid)) o.gid = a.gid;
   if (a.locked === true) o.locked = true;
+  if (typeof a.layer === 'string' && /^[a-z0-9]{1,16}$/.test(a.layer)) o.layer = a.layer;
   return o;
+}
+// Calques du document : { layers: [{ id, name, hidden, locked }] (du dessous au dessus), pdfLocked }
+function layerList(l) {
+  if (!l || !Array.isArray(l.layers)) return null;
+  const list = l.layers.slice(0, 100).filter(x => x && typeof x.id === 'string' && /^[a-z0-9]{1,16}$/.test(x.id))
+    .map(x => ({ id: x.id, name: str(x.name, 60) && x.name.trim() ? x.name : 'Calque', ...(x.hidden === true ? { hidden: true } : {}), ...(x.locked === true ? { locked: true } : {}) }));
+  return list.length ? { layers: list.filter((x, k) => list.findIndex(y => y.id === x.id) === k), pdfLocked: l.pdfLocked === true } : null;
 }
 function sanitizeOne(a) {
   if (!a || typeof a !== 'object') return null;
@@ -186,5 +214,5 @@ function sanitizeOne(a) {
   return null;
 }
 
-return { keep, write, read, hasLayer, sanitize, linkMark, KEY };
+return { keep, write, read, hasLayer, sanitize, vitem, layerList, linkMark, KEY };
 })();
