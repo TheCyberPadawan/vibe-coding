@@ -26,8 +26,8 @@
   let p = S.pages[0];
   p.annots.push({ id: 'ann1', type: 'shape', kind: 'rect', x: 350, y: 470, w: 60, h: 30, r: 0, stroke: '#d0312d', fill: '', width: 2 });
   A.setSel(null);
-  const r = v.el.getBoundingClientRect();
-  const at = (x, y) => { const [vx, vy] = v.vp.convertToViewportPoint(x, y); return { clientX: r.left + vx, clientY: r.top + vy }; };
+  // Position de la page relue à chaque fois : la barre de propriétés peut changer de hauteur avec la sélection
+  const at = (x, y) => { const r = v.el.getBoundingClientRect(), [vx, vy] = v.vp.convertToViewportPoint(x, y); return { clientX: r.left + vx, clientY: r.top + vy }; };
   const fire = (el, type, pt, extra = {}) => el.dispatchEvent(new PointerEvent(type, { bubbles: true, button: 0, pointerId: 1, isPrimary: true, ...pt, ...extra }));
   const drag = (el, from, to) => { fire(el, 'pointerdown', at(...from)); fire(el, 'pointermove', at(from[0] + 2, from[1] + 2)); fire(el, 'pointermove', at(...to)); fire(el, 'pointerup', at(...to)); };
 

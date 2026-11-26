@@ -1666,41 +1666,81 @@ function snapMove(box0, base0, dx, dy, t, tol) {
 }
 
 /* ---------- Aligner et répartir ---------- */
-function alignSel(how) {
-  const list = selAnnots(); if (!list.length) return;
-  // Un groupe se déplace d'un bloc : il est aligné comme un seul élément
-  const units = selUnits(list), v = V.get(S.sel.pid), boxes = units.map(u => unionBox(u.map(annotBox)));
-  // Plusieurs éléments : alignés entre eux ; un seul (ou un seul groupe) : centré sur la page
-  const [px0, py0, px1, py1] = v.pg.view, ref = units.length > 1 ? unionBox(boxes) : { x0: px0, y0: py0, x1: px1, y1: py1 };
-  const main = selAnnot(), mainBase = baselineOf(main);
+// Blocs de la sélection, ajouts comme éléments d'origine du PDF : un groupe = un bloc, un élément seul = un bloc,
+// et les lettres d'une même ligne de texte du PDF (non groupées) = un bloc, pour ne pas les empiler les unes sur les autres
+function alignUnits() {
+  const m = selMembers(); if (!m) return null;
+  const units = new Map(), add = (k, a, sh) => {
+    if (!units.has(k)) units.set(k, { annots: [], items: [] });
+    if (a) units.get(k).annots.push(a); if (sh) units.get(k).items.push(sh);
+  };
+  m.annots.forEach(a => add(a.gid || '#' + a.id, a));
+  const loose = [];
+  for (const sh of m.items) { const g = vmOf(m.p, vKey(sh)).gid; if (g) add(g, null, sh); else if (sh.kind === 'text') loose.push(sh); else add('@' + vKey(sh), null, sh); }
+  const lines = [];
+  for (const it of loose.map(sh => ({ sh, b: vBox(m.p, sh) })).sort((p, q) => (q.b.y0 - p.b.y0) || (p.b.x0 - q.b.x0))) {
+    const h = Math.max(1, it.b.y1 - it.b.y0);
+    const L = lines.find(l => Math.abs(l.b.y0 - it.b.y0) < h * 0.35 && Math.abs(l.b.y1 - it.b.y1) < h * 0.35 && it.b.x0 - l.b.x1 < h * 0.8 && l.b.x0 - it.b.x1 < h * 0.8);
+    if (L) { L.items.push(it.sh); L.b = unionBox([L.b, it.b]); } else lines.push({ items: [it.sh], b: it.b });
+  }
+  lines.forEach((l, i) => units.set('~' + i, { annots: [], items: l.items }));
+  return { m, units: [...units.values()].map(u => ({ ...u, b: unionBox([...u.annots.map(annotBox), ...u.items.map(sh => vBox(m.p, sh))]) })) };
+}
+// Déplace chaque bloc de son décalage (moves : [{ u, dx, dy }]) ; une seule étape d'annulation
+function shiftUnits(m, moves) {
   snapshot();
-  units.forEach((u, i) => {
-    const b = boxes[i]; let dx = 0, dy = 0;
+  let next = m.p.vedits, pdf = false;
+  for (const { u, dx, dy } of moves) {
+    if (!dx && !dy) continue;
+    u.annots.forEach(a => shiftAnnot(a, dx, dy));
+    for (const sh of u.items) { next = withEdit(next, sh, { m: round4(AtelierVector.mul(edOf({ vedits: next }, sh).m || ID6, [1, 0, 0, 1, dx, dy])) }); pdf = true; }
+  }
+  if (pdf) { m.p.vedits = next; refreshView(m.v); }
+  drawAnnots(m.v); propsKey = ''; updateProps();
+}
+function alignSel(how) {
+  const au = alignUnits(); if (!au || !au.units.length) return;
+  const { m, units } = au;
+  // Plusieurs blocs : alignés entre eux ; un seul (ou un seul groupe) : centré sur la page
+  const [px0, py0, px1, py1] = m.v.pg.view, ref = units.length > 1 ? unionBox(units.map(u => u.b)) : { x0: px0, y0: py0, x1: px1, y1: py1 };
+  const mainBase = S.sel?.pid === m.p.id ? baselineOf(selAnnot()) : null;
+  shiftUnits(m, units.map(u => {
+    const b = u.b; let dx = 0, dy = 0;
     if (how === 'left') dx = ref.x0 - b.x0;
     else if (how === 'hcenter') dx = (ref.x0 + ref.x1 - b.x0 - b.x1) / 2;
     else if (how === 'right') dx = ref.x1 - b.x1;
     else if (how === 'top') dy = ref.y1 - b.y1;
     else if (how === 'vcenter') dy = (ref.y0 + ref.y1 - b.y0 - b.y1) / 2;
     else if (how === 'bottom') dy = ref.y0 - b.y0;
-    else if (how === 'baseline' && mainBase != null && u.length === 1 && baselineOf(u[0]) != null) dy = mainBase - u[0].y;
-    u.forEach(a => shiftAnnot(a, dx, dy));
-  });
-  redraw(S.sel.pid);
+    else if (how === 'baseline' && mainBase != null && !u.items.length && u.annots.length === 1 && baselineOf(u.annots[0]) != null) dy = mainBase - u.annots[0].y;
+    return { u, dx, dy };
+  }));
 }
-// Espaces égaux entre les éléments (un groupe compte pour un), les deux extrêmes restant en place
+// Espaces égaux entre les blocs, les deux extrêmes restant en place
 function distributeSel(axis) {
-  const units = selUnits(); if (units.length < 3) return;
+  const au = alignUnits(); if (!au || au.units.length < 3) return toast('Sélectionnez au moins trois éléments ou groupes à répartir.');
   const lo = axis === 'h' ? 'x0' : 'y0', hi = axis === 'h' ? 'x1' : 'y1';
-  const items = units.map(u => ({ u, b: unionBox(u.map(annotBox)) })).sort((p, q) => p.b[lo] + p.b[hi] - q.b[lo] - q.b[hi]);
-  const span = items[items.length - 1].b[hi] - items[0].b[lo], used = items.reduce((s, it) => s + it.b[hi] - it.b[lo], 0);
+  const items = [...au.units].sort((p, q) => p.b[lo] + p.b[hi] - q.b[lo] - q.b[hi]);
+  const span = items[items.length - 1].b[hi] - items[0].b[lo], used = items.reduce((t, u) => t + u.b[hi] - u.b[lo], 0);
   const gap = (span - used) / (items.length - 1);
-  snapshot();
   let pos = items[0].b[hi] + gap;
-  for (const it of items.slice(1, -1)) {
-    const d = pos - it.b[lo]; it.u.forEach(a => shiftAnnot(a, axis === 'h' ? d : 0, axis === 'h' ? 0 : d));
-    pos += it.b[hi] - it.b[lo] + gap;
-  }
-  redraw(S.sel.pid);
+  const moves = items.slice(1, -1).map(u => { const d = pos - u.b[lo]; pos += u.b[hi] - u.b[lo] + gap; return { u, dx: axis === 'h' ? d : 0, dy: axis === 'h' ? 0 : d }; });
+  shiftUnits(au.m, moves);
+}
+// Boutons Aligner / Répartir de la barre de propriétés (n : nombre de blocs ; texts : textes ajoutés seuls)
+function alignBar(n, texts) {
+  const ab = (k, ic, tip) => `<button class="btn icon" data-align="${k}" title="${tip}">${icon(ic)}</button>`;
+  const db = (k, ic, tip) => `<button class="btn icon" data-dist="${k}" title="${tip}">${icon(ic)}</button>`;
+  return n > 1
+    ? `<span class="aligns" role="group" aria-label="Aligner"><span class="hint">${n} blocs</span>${ab('left', 'alignL', 'Aligner à gauche')}${ab('hcenter', 'alignHC', 'Centrer horizontalement')}${ab('right', 'alignR', 'Aligner à droite')}`
+      + `${ab('top', 'alignT', 'Aligner en haut')}${ab('vcenter', 'alignVC', 'Centrer verticalement')}${ab('bottom', 'alignB', 'Aligner en bas')}`
+      + (texts > 1 ? ab('baseline', 'baseline', 'Aligner les lignes de base des textes sur le dernier sélectionné') : '')
+      + (n > 2 ? db('h', 'distH', 'Répartir horizontalement : espaces égaux entre les blocs') + db('v', 'distV', 'Répartir verticalement : espaces égaux entre les blocs') : '') + '</span>'
+    : `<span class="aligns" role="group" aria-label="Centrer sur la page">${ab('hcenter', 'alignHC', 'Centrer horizontalement sur la page')}${ab('vcenter', 'alignVC', 'Centrer verticalement sur la page')}</span>`;
+}
+function bindAlignBar(el) {
+  el.querySelectorAll('[data-align]').forEach(b => b.addEventListener('click', () => alignSel(b.dataset.align)));
+  el.querySelectorAll('[data-dist]').forEach(b => b.addEventListener('click', () => distributeSel(b.dataset.dist)));
 }
 // Rectangle tiré à la souris ; pour surligner / souligner / barrer, il s'aligne sur les lignes de texte couvertes
 function dragRect(e, v, P, t) {
@@ -2190,11 +2230,14 @@ function updateProps(force) {
     if (key === propsKey && !force) return; propsKey = key;
     const el = $('#props');
     el.innerHTML = `<span class="hint"><b>${grp ? `Groupe de ${n} éléments` : oneText ? 'Texte du PDF' : `${n} éléments sélectionnés`}</b></span>`
+      + alignBar(alignUnits()?.units.length || 1, 0)
       + groupButtons(units, grouped)
       + `<button class="btn danger" data-act="vdel" title="Supprimer (Suppr)">${icon('trash')}Supprimer</button>`
-      + `<span class="hint">${grp ? 'Faites-le glisser pour le déplacer, poignée bleue pour le redimensionner.' : oneText ? 'Faites-le glisser pour le déplacer ; double-cliquez pour modifier ses mots.' : 'Faites glisser l\'un d\'eux pour tout déplacer. Maj+clic pour en ajouter ou en retirer.'}</span>`;
+      // Aide courte : la barre doit tenir sur une ligne, sinon la page saute à chaque sélection
+      + (oneText ? '<span class="hint">Faites-le glisser pour le déplacer ; double-cliquez pour modifier ses mots.</span>'
+        : `<span class="hint" title="Faites glisser l'un d'eux pour tout déplacer. Maj+clic pour en ajouter ou en retirer. Les groupes et les lignes de texte comptent chacun pour un bloc.">${grp ? 'Glisser : déplacer · poignée : redimensionner' : 'Glisser : tout déplacer'}</span>`);
     el.querySelector('[data-act=vdel]').addEventListener('click', vDelete);
-    bindGroupButtons(el);
+    bindGroupButtons(el); bindAlignBar(el);
     return;
   }
   const vs = vSel();
@@ -2205,10 +2248,10 @@ function updateProps(force) {
     el.innerHTML = `<span class="hint"><b>${vs.sh.kind === 'stroke' ? 'Tracé du PDF' : 'Bloc du PDF'}</b></span>`
       + (vs.sh.kind === 'stroke' ? '' : fill ? `<label>Couleur <input type="color" data-vfill value="${fill}"></label>` : '<span class="hint">Couleur en dégradé ou en motif : non modifiable.</span>')
       + (!vs.sh.copyId && (ed.m || ed.fill) ? '<button class="btn" data-act="vreset" title="Remettre le bloc comme dans le PDF d\'origine">Rétablir</button>' : '')
-      + groupButtons(1, false)
+      + alignBar(1, 0) + groupButtons(1, false)
       + `<button class="btn danger" data-act="vdel" title="Supprimer (Suppr)">${icon('trash')}Supprimer</button>`
       + '<span class="hint">Faites glisser pour déplacer, poignée bleue pour redimensionner (Maj : garder les proportions).</span>';
-    bindGroupButtons(el);
+    bindGroupButtons(el); bindAlignBar(el);
     el.querySelector('[data-vfill]')?.addEventListener('change', e => vChange({ fill: e.target.value }));
     el.querySelector('[data-act=vreset]')?.addEventListener('click', () => vChange(null));
     el.querySelector('[data-act=vdel]').addEventListener('click', vDelete);
@@ -2297,14 +2340,7 @@ function updateProps(force) {
   }
   if (a) {
     const units = selUnits(), n = units.length, grp = selGroup(), texts = units.filter(u => u.length === 1 && baselineOf(u[0]) != null).length;
-    const ab = (k, ic, tip) => `<button class="btn icon" data-align="${k}" title="${tip}">${icon(ic)}</button>`;
-    const db = (k, ic, tip) => `<button class="btn icon" data-dist="${k}" title="${tip}">${icon(ic)}</button>`;
-    h += n > 1
-      ? `<span class="aligns" role="group" aria-label="Aligner"><span class="hint">${n} éléments</span>${ab('left', 'alignL', 'Aligner à gauche')}${ab('hcenter', 'alignHC', 'Centrer horizontalement')}${ab('right', 'alignR', 'Aligner à droite')}`
-        + `${ab('top', 'alignT', 'Aligner en haut')}${ab('vcenter', 'alignVC', 'Centrer verticalement')}${ab('bottom', 'alignB', 'Aligner en bas')}`
-        + (texts > 1 ? ab('baseline', 'baseline', 'Aligner les lignes de base des textes sur le dernier sélectionné') : '')
-        + (n > 2 ? db('h', 'distH', 'Répartir horizontalement') + db('v', 'distV', 'Répartir verticalement') : '') + '</span>'
-      : `<span class="aligns" role="group" aria-label="Centrer sur la page">${ab('hcenter', 'alignHC', 'Centrer horizontalement sur la page')}${ab('vcenter', 'alignVC', 'Centrer verticalement sur la page')}</span>`;
+    h += alignBar(n, texts);
     if (grp) h = `<span class="hint"><b>Groupe de ${grp.annots.length + grp.items.length} éléments</b></span>` + h;
     h += groupButtons(n, units.some(u => u.length > 1));
     if (S.layers.length > 1) {   // calque des éléments sélectionnés
@@ -2337,8 +2373,7 @@ function updateProps(force) {
   el.querySelector('[data-act=del]')?.addEventListener('click', deleteSel);
   bindGroupButtons(el);
   el.querySelector('[data-tolayer]')?.addEventListener('change', e => { if (e.target.value) moveToLayer(e.target.value); });
-  el.querySelectorAll('[data-align]').forEach(b => b.addEventListener('click', () => alignSel(b.dataset.align)));
-  el.querySelectorAll('[data-dist]').forEach(b => b.addEventListener('click', () => distributeSel(b.dataset.dist)));
+  bindAlignBar(el);
   el.querySelector('[data-act=sig]')?.addEventListener('click', openSig);
   el.querySelector('[data-act=img]')?.addEventListener('click', () => $('#fileImage').click());
   el.querySelector('[data-act=cropimg]')?.addEventListener('click', () => { const v = V.get(S.sel.pid); if (v) enterCrop(v, a); });
