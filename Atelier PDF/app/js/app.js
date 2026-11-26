@@ -2107,6 +2107,20 @@ async function pdfFontOf(v, it) {
   } catch (e) { console.warn('Police du texte', e); }
   return out;
 }
+// Texte espacé lettre par lettre (letter-spacing d'une page web imprimée) : pdf.js le lit « C E Q U E  J E … »,
+// sans distinguer les mots. Les lettres sont relues à leur place exacte (éléments du PDF, une par lettre) :
+// l'écart courant entre deux lettres donne l'espacement, un écart nettement plus grand marque un vrai blanc.
+function spacedText(v, it) {
+  if (Math.abs(it.r) > 0.5 || !/^(\S\s){2,}\S/.test(it.str)) return null;
+  const chars = [...it.str.replace(/\s+/g, '')];
+  const glyphs = vList(v).filter(s => s.kind === 'text').map(s => vBox(v.p, s))
+    .filter(b => b.x0 >= it.x - 1 && b.x1 <= it.x + it.w + 1 && b.y0 < it.y + it.fs * 0.6 && b.y1 > it.y + it.fs * 0.2)
+    .sort((a, b) => a.x0 - b.x0);
+  if (glyphs.length !== chars.length) return null;   // une lettre par élément, sinon on garde la lecture de pdf.js
+  const gaps = glyphs.slice(1).map((b, k) => b.x0 - glyphs[k].x1), med = [...gaps].sort((a, b) => a - b)[gaps.length >> 1];
+  const text = chars.map((c, k) => (k && gaps[k - 1] > med + it.fs * 0.15 ? ' ' : '') + c).join('');
+  return { text, ls: Math.round(Math.max(-0.2, Math.min(1, med / it.fs)) * 1000) / 1000 };
+}
 async function replaceTextAt(v, P, quiet) {
   const it = itemAt(await ensureText(v), P);
   if (!it) { if (!quiet) toast('Aucun texte ici. Cliquez directement sur un mot du PDF.'); return; }
@@ -2117,6 +2131,7 @@ async function replaceTextAt(v, P, quiet) {
   const mask = { id: uid(), type: 'rect', kind: 'redact', erase: true, x: r2(o[0]), y: r2(o[1]), w: r2(it.w + pad * 2), h: r2(it.fs * 1.24), r: r2(it.r), color: bg };
   const txt = { id: uid(), type: 'text', x: r2(it.x), y: r2(it.y), r: r2(it.r), text: it.str, size: Math.round(it.fs * 10) / 10, font: pf.font, bold: pf.bold, italic: pf.italic, color: ink };
   if (pf.psName) txt.psName = pf.psName;
+  const sp = spacedText(v, it); if (sp) { txt.text = sp.text; txt.ls = sp.ls; }   // texte espacé (letter-spacing)
   v.p.annots.push(mask, txt); S.sel = { pid: v.p.id, aid: txt.id }; updateProps();
   openEditor(v, txt, { pushed: true });
 }

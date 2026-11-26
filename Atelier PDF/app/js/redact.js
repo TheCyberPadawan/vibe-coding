@@ -157,6 +157,21 @@ function parseCMap(bytes) {
   return { ranges, cid: c => { for (const [a, b, d] of cids) if (c >= a && c <= b) return d + c - a; return 0; } };
 }
 
+// Codes d'une police composite qui désignent une espace, d'après sa table ToUnicode (bfchar / bfrange)
+function blankCodes(fdict) {
+  const out = new Set(), tu = fdict.lookup(N('ToUnicode'));
+  if (!(tu instanceof PDFStream)) return out;
+  let s; try { s = latin1.decode(L.decodePDFRawStream(tu).decode()); } catch { return out; }
+  const hex = h => parseInt(h, 16), blank = u => /^(0020|00a0|3000)$/i.test(u);
+  for (const blk of s.matchAll(/beginbfchar([\s\S]*?)endbfchar/g))
+    for (const m of blk[1].matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g)) if (blank(m[2])) out.add(hex(m[1]));
+  for (const blk of s.matchAll(/beginbfrange([\s\S]*?)endbfrange/g))
+    for (const m of blk[1].matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]{4})>/g)) {
+      const a = hex(m[1]), b = hex(m[2]), u = hex(m[3]);
+      for (let c = a; c <= b && c - a < 256; c++) if (blank((u + c - a).toString(16).padStart(4, '0'))) out.add(c);
+    }
+  return out;
+}
 const fontCache = new WeakMap();
 function fontInfo(doc, fdict) {
   if (!(fdict instanceof PDFDict)) unsupported('police introuvable');
@@ -183,7 +198,7 @@ function fontInfo(doc, fdict) {
         else { const c1 = num(a[k + 1]), w = num(a[k + 2]); for (let c = c0; c <= c1 && c - c0 < 65536; c++) widths.set(c, w); k += 3; }
       }
     }
-    const desc = look(d, 'FontDescriptor');
+    const desc = look(d, 'FontDescriptor'), blanks = blankCodes(fdict);
     info = {
       split(bytes) {
         const out = [];
@@ -196,7 +211,7 @@ function fontInfo(doc, fdict) {
           }
           if (!r) r = { code: bytes[i], n: 1 };
           const cid = cmap.cid(r.code);
-          out.push({ bytes: bytes.subarray(i, i + r.n), w0: (widths.get(cid) ?? dw) / 1000, space: r.n === 1 && r.code === 32 });
+          out.push({ bytes: bytes.subarray(i, i + r.n), w0: (widths.get(cid) ?? dw) / 1000, space: r.n === 1 && r.code === 32, blank: blanks.has(r.code) });
           i += r.n;
         }
         return out;

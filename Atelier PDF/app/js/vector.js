@@ -166,7 +166,8 @@ function run(doc, bytes, res, ctm0, gs0, ctx, depth = 0) {
         if (it?.t !== 'str') continue;
         for (const g of fi.split(it.v)) {
           const trm = mul([ts.fs * ts.th, 0, 0, ts.fs, 0, ts.rise], mul(tm, gs.ctm)), w = Math.max(g.w0, 0.05);
-          if (!g.space) { ink = true; pts.push(ap(trm, 0, fi.desc), ap(trm, w, fi.desc), ap(trm, w, fi.asc), ap(trm, 0, fi.asc)); }
+          if (!g.space && !g.blank) { ink = true;   // une espace (même codée sur deux octets) ne se dessine pas
+             pts.push(ap(trm, 0, fi.desc), ap(trm, w, fi.desc), ap(trm, w, fi.asc), ap(trm, 0, fi.asc)); }
           const adv = (g.w0 * ts.fs + ts.tc + (g.space ? ts.tw : 0)) * ts.th;
           tm = mul([1, 0, 0, 1, adv, 0], tm); total += adv;
         }
